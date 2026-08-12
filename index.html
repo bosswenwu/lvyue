@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>履约云 · 采购合同履约管理</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- 登录 -->
+<div class="gate" id="gate" hidden><div class="gbox">
+  <div class="glogo"><div class="mark">履</div><div><b>履约云</b><span>采购合同履约管理</span></div></div>
+  <div id="gateBody"></div>
+</div></div>
+
+<div class="app" id="app" hidden>
+  <aside class="rail">
+    <div class="brand"><div class="mark">履</div><div class="txt"><b>履约云</b><span id="modeTag">本机</span></div></div>
+    <button class="nav" data-go="home" aria-current="true"><svg class="ico" viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5V21H3z"/></svg><span class="lbl">工作台</span></button>
+    <button class="nav" data-go="list"><svg class="ico" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg><span class="lbl">合同台账</span></button>
+    <button class="nav" data-go="alert"><svg class="ico" viewBox="0 0 24 24"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg><span class="lbl">预警中心</span><span class="badge" id="navBadge">0</span></button>
+    <button class="nav" data-go="cash"><svg class="ico" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="15" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg><span class="lbl">付款计划</span></button>
+    <button class="nav" data-go="short"><svg class="ico" viewBox="0 0 24 24"><path d="M3 7h13v10H3z"/><path d="M16 10h4l1 3v4h-5"/><circle cx="7" cy="18" r="2"/><circle cx="18" cy="18" r="2"/></svg><span class="lbl">催货清单</span></button>
+    <button class="nav" data-go="data"><svg class="ico" viewBox="0 0 24 24"><path d="M12 3c4.4 0 8 1.3 8 3s-3.6 3-8 3-8-1.3-8-3 3.6-3 8-3z"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6"/></svg><span class="lbl">数据管理</span></button>
+    <button class="nav" data-go="users" id="navUsers" hidden><svg class="ico" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3.5"/><path d="M2 20c0-3.5 3-6 7-6s7 2.5 7 6"/><path d="M17 11h5M19.5 8.5v5"/></svg><span class="lbl">用户管理</span></button>
+    <div class="railfoot" id="railFoot"></div>
+  </aside>
+
+  <div class="main">
+    <div class="topbar">
+      <button class="search" id="openCmd">搜合同号 / 供应商 / 物料<kbd>Ctrl K</kbd></button>
+      <div class="spacer"></div>
+      <span class="stamp" id="stamp"></span>
+      <button class="iconbtn" id="newC">+ 新增合同</button>
+      <button class="iconbtn" id="themeBtn" title="切换主题">◐</button>
+      <div class="who" id="who"></div>
+    </div>
+
+    <section class="page" id="p-home">
+      <div class="phead"><div><div class="eyebrow" id="todayTag"></div><h1>今天需要你处理的事</h1></div></div>
+      <div id="notes"></div>
+      <div class="kpis" id="kpis"></div>
+      <div class="grid2">
+        <div class="card"><header><h2>行动队列</h2><span class="eyebrow" id="qCount"></span></header><div class="q" id="queue"></div></div>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div class="card"><header><h2>现金流预测</h2><span class="eyebrow">未来 12 周应付</span></header><div style="padding:13px"><canvas id="cash"></canvas></div></div>
+          <div class="card"><header><h2>供应商风险 TOP</h2><span class="eyebrow">逾期 × 金额</span></header><div id="supRisk" style="padding:6px 13px 13px"></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="p-list" hidden>
+      <div class="phead"><div><div class="eyebrow">CONTRACT LEDGER</div><h1>合同台账</h1></div><div class="spacer"></div>
+        <label class="chip"><input type="checkbox" id="fVoid"> 含作废</label>
+        <button class="btn" id="expBtn">导出 CSV</button></div>
+      <div class="chips" id="views"></div>
+      <div class="bar">
+        <div class="field"><label>搜索</label><input id="fq" placeholder="合同号 / 供应商 / 订单号"></div>
+        <div class="field"><label>到货</label><select id="fArr"><option value="">全部</option><option>未到货</option><option>部分到货</option><option>全部到货</option></select></div>
+        <div class="field"><label>付款</label><select id="fPay"><option value="">全部</option><option>未付款</option><option>部分付款</option><option>全部付清</option></select></div>
+        <div class="field"><label>供应商</label><select id="fSup"><option value="">全部</option></select></div>
+        <button class="btn" id="reset">重置</button><div class="spacer"></div><span class="eyebrow" id="cnt"></span>
+      </div>
+      <div class="tw"><table><thead><tr id="thr"></tr></thead><tbody id="tb"></tbody></table></div>
+    </section>
+
+    <section class="page" id="p-alert" hidden>
+      <div class="phead"><div><div class="eyebrow">EXCEPTIONS</div><h1>预警中心</h1><p>逾期按「承诺交期」优先，缺失时回落「约定交期」</p></div></div>
+      <div class="kpis" id="aKpi"></div>
+      <div class="card"><header><h2>交货预警</h2></header><div class="q" id="aDeliver"></div></div>
+      <div class="card"><header><h2>付款预警</h2></header><div class="q" id="aPay"></div></div>
+    </section>
+
+    <section class="page" id="p-cash" hidden>
+      <div class="phead"><div><div class="eyebrow">PAYMENT SCHEDULE</div><h1>付款计划</h1><p>按付款条件自动拆节点，可逐笔登记付款</p></div>
+        <div class="spacer"></div><button class="btn" id="genAll">为缺计划的合同批量生成</button><span class="eyebrow" id="payTot"></span></div>
+      <div class="grid2">
+        <div class="card"><header><h2>到期日历</h2><span class="eyebrow" id="calTag"></span></header><div class="calgrid" id="cal"></div></div>
+        <div class="card"><header><h2>未结节点</h2></header><div class="q" id="payList"></div></div>
+      </div>
+    </section>
+
+    <section class="page" id="p-short" hidden>
+      <div class="phead"><div><div class="eyebrow">SHORTAGE</div><h1>催货清单</h1><p>按物料行算未到数量，可直接导出发给供应商</p></div>
+        <div class="spacer"></div><button class="btn pri" id="expShort">导出催货单 CSV</button></div>
+      <div class="bar"><label class="chip"><input type="checkbox" id="shortLateOnly" checked> 只看已过交期</label><div class="spacer"></div><span class="eyebrow" id="shortCnt"></span></div>
+      <div class="tw"><table><thead><tr><th class="no">合同号</th><th class="no">供应商</th><th class="no">交期</th><th class="no">逾期</th><th class="no">行号</th><th class="no">物料</th><th class="no">规格</th><th class="no r">订购</th><th class="no r">已到</th><th class="no r">未到</th><th class="no">单位</th><th class="no r">未到金额</th></tr></thead><tbody id="shortTb"></tbody></table></div>
+    </section>
+
+    <section class="page" id="p-data" hidden>
+      <div class="phead"><div><div class="eyebrow">DATA</div><h1>数据管理</h1><p>把现有系统导出的 Excel 搬进来，或备份整库</p></div></div>
+      <div class="grid2">
+        <div class="card"><header><h2>导入</h2></header><div style="padding:14px;display:flex;flex-direction:column;gap:12px">
+          <div class="hint"><b>做法：</b>原系统「导出 Excel」→ Excel 打开 → 全选 Ctrl+A → 复制 Ctrl+C → 粘贴到下面。合同表和物料明细表都认，按合同号合并。</div>
+          <textarea class="paste" id="pasteBox" placeholder="粘贴 Excel 内容（要带表头行）…"></textarea>
+          <div class="drop" id="drop">或把 CSV / TSV 文件拖进来</div>
+          <input type="file" id="file" accept=".csv,.tsv,.txt" hidden>
+          <div class="bar"><button class="btn pri" id="doParse">解析并预览</button><button class="btn" id="pickFile">选择文件</button></div>
+          <div id="importPreview"></div>
+        </div></div>
+        <div style="display:flex;flex-direction:column;gap:14px">
+          <div class="card"><header><h2>备份 / 还原</h2></header><div style="padding:14px;display:flex;flex-direction:column;gap:10px">
+            <p class="muted">本机模式下数据在这台电脑的浏览器里，请定期备份。</p>
+            <div class="bar"><button class="btn pri" id="backup">导出备份</button><button class="btn" id="restore">还原备份</button><input type="file" id="restoreFile" accept=".json" hidden></div>
+          </div></div>
+          <div class="card"><header><h2>当前库</h2></header><div style="padding:14px" id="dbStat"></div></div>
+          <div class="card"><header><h2>接入云端（多人共用）</h2></header><div style="padding:14px;display:flex;flex-direction:column;gap:10px">
+            <p class="muted">填入 Supabase 项目地址和 anon key 后，数据改为存云端，同事登录即可看到同一份。建表 SQL 见随附的 schema.sql。</p>
+            <div class="form"><label><span>项目地址</span><input id="cfgUrl" placeholder="https://xxxx.supabase.co"></label>
+            <label><span>anon key</span><input id="cfgKey" placeholder="eyJ..."></label></div>
+            <div class="bar"><button class="btn pri" id="cfgSave">保存并连接</button><button class="btn" id="cfgClear">断开，改回本机</button></div>
+            <div id="cfgState"></div>
+          </div></div>
+          <div class="card"><header><h2>危险操作</h2></header><div style="padding:14px"><button class="btn danger" id="wipe">清空全部数据</button></div></div>
+        </div>
+      </div>
+    </section>
+
+    <section class="page" id="p-users" hidden>
+      <div class="phead"><div><div class="eyebrow">USERS</div><h1>用户管理</h1><p>新建账号会生成随机密码，只显示一次，请当场发给对方</p></div>
+        <div class="spacer"></div><button class="btn pri" id="newU">新建账号</button></div>
+      <div id="newCred"></div>
+      <div class="tw"><table><thead><tr><th class="no">账号</th><th class="no">姓名</th><th class="no">角色</th><th class="no">创建时间</th><th class="no">状态</th><th class="no"></th></tr></thead><tbody id="userTb"></tbody></table></div>
+    </section>
+  </div>
+</div>
+
+<div class="scrim" id="scrim"></div>
+<aside class="drawer" id="drawer" aria-hidden="true">
+  <div class="dhead" id="dhead"></div>
+  <div class="tabs" id="dtabs">
+    <button class="tab" aria-selected="true" data-t="0">履约时间轴</button>
+    <button class="tab" data-t="1">物料与到货</button>
+    <button class="tab" data-t="2">付款计划</button>
+    <button class="tab" data-t="3">附件</button>
+    <button class="tab" data-t="4">变更留痕</button>
+  </div>
+  <div class="dbody" id="dbody"></div>
+</aside>
+
+<div class="modal" id="modal"><div class="mbox">
+  <header><h3 id="mTitle"></h3><div class="spacer"></div><button class="btn" data-close>关闭</button></header>
+  <div class="body" id="mBody"></div><footer id="mFoot"></footer>
+</div></div>
+
+<div class="cmdk" id="cmdk"><input id="cmdi" placeholder="输入合同号、供应商、物料"><ul id="cmdl"></ul></div>
+<div class="toast" id="toast"></div>
+
+<script src="app-core.js"></script>
+<script src="app-ui.js"></script>
+</body>
+</html>

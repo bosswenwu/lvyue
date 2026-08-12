@@ -1,0 +1,90 @@
+<!doctype html><meta charset="utf-8"><title>pending</title>
+<script src="app-core.js"></script>
+<script>
+const L=[];const ok=(n,c,extra)=>L.push((c?"PASS":"FAIL")+" "+n+(c?"":" <"+extra+">"));
+(async()=>{
+try{
+  /* 1. 日期规整 */
+  ok("date_slash",normDate("2025/6/5")==="2025-06-05",normDate("2025/6/5"));
+  ok("date_cn",normDate("2025年6月5日")==="2025-06-05",normDate("2025年6月5日"));
+  ok("date_serial",normDate("45813")==="2025-06-05",normDate("45813"));
+  ok("date_serial2",normDate("45292")==="2024-01-01",normDate("45292"));
+  ok("date_empty",normDate("—")==="",normDate("—"));
+  ok("num_comma",num("1,234,567.89")===1234567.89,num("1,234,567.89"));
+
+  /* 2. 密码 */
+  const p=randPw(12);
+  ok("pw_len",p.length===12,p.length);
+  ok("pw_classes",/[A-Z]/.test(p)&&/[a-z]/.test(p)&&/[0-9]/.test(p),p);
+  ok("pw_noconfuse",!/[0O1lI]/.test(p),p);
+  const h1=await hashPw("abc","s1"), h2=await hashPw("abc","s1"), h3=await hashPw("abc","s2");
+  ok("hash_stable",h1===h2); ok("hash_salted",h1!==h3); ok("hash_len",h1.length===64,h1.length);
+
+  /* 3. 本机后端 + 账号 */
+  const be=await Store.useLocal();
+  await be.replaceAll(emptyDB());
+  const pw=randPw(12);
+  await be.createUser({username:"admin",name:"何祥财",role:"admin",password:pw});
+  const who=await be.login("admin",pw);
+  ok("login_ok",who.username==="admin"&&who.role==="admin",JSON.stringify(who));
+  let bad=false; try{await be.login("admin","wrong")}catch(e){bad=true}
+  ok("login_reject",bad);
+  let dup=false; try{await be.createUser({username:"admin",password:"x"})}catch(e){dup=true}
+  ok("user_dup_reject",dup);
+
+  /* 4. 导入解析 */
+  const tsv=["合同号\t供应商\t合同名称\t合同总额\t签订日期\t约定交期\t承诺交期\t付款条件",
+    "T-001\t甲公司\t钢材\t1,000,000.00\t2025/6/1\t2026/8/5\t2026/8/5\t预付30%，货到付60%，质保金10%",
+    "T-002\t乙公司\t设备\t50000\t2025/7/1\t2026/9/1\t\t月结30天"].join("\n");
+  const P=parseTable(tsv);
+  ok("parse_rows",P.data.length===2,P.data&&P.data.length);
+  ok("parse_notmat",P.isMaterial===false,P.isMaterial);
+  const bad2=parseTable("供应商\t金额\n甲\t1");
+  ok("parse_needs_no",!!bad2.error,JSON.stringify(bad2).slice(0,60));
+
+  /* 5. 合同计算 + 物料行到货 */
+  const c1={id:"c1",contract_no:"T-001",total_amount:1000000,promised_delivery_date:"2026-08-05",contract_delivery_date:"2026-08-05",sign_date:"2025-06-01",pay_condition_text:"预付30%，货到付60%，质保金10%"};
+  const m1={id:"m1",contract_id:"c1",material_name:"方管",plan_qty:100,amount_tax_in:600000};
+  const m2={id:"m2",contract_id:"c1",material_name:"螺栓",plan_qty:200,amount_tax_in:400000};
+  const arrs=[{id:"a1",contract_id:"c1",material_id:"m1",qty:100,amount:600000,date:"2026-08-01"},
+              {id:"a2",contract_id:"c1",material_id:"m2",qty:50,amount:100000,date:"2026-08-02"}];
+  const cc=calcContract(c1,[m1,m2],arrs,[],[]);
+  ok("calc_arr",cc.arr===700000,cc.arr);
+  ok("calc_arrPct",Math.abs(cc.arrPct-0.7)<1e-9,cc.arrPct);
+  ok("calc_owe",cc.owe===1000000,cc.owe);
+  ok("calc_late",cc.late===6,cc.late+" (today "+iso(TODAY)+")");
+  ok("calc_sev",cc.sev==="crit",cc.sev);
+  ok("line_short",cc.shortLines.length===1&&cc.shortLines[0].short===150,JSON.stringify(cc.shortLines.map(l=>l.short)));
+  ok("line_pct",Math.abs(cc.lines[0].pct-1)<1e-9&&Math.abs(cc.lines[1].pct-0.25)<1e-9,cc.lines.map(l=>l.pct).join(","));
+
+  /* 6. 付款节点生成 */
+  const pl=genPlan(c1,cc);
+  ok("plan_n",pl.length===3,JSON.stringify(pl.map(x=>x.name)));
+  ok("plan_ratio",Math.abs(pl.reduce((s,x)=>s+x.ratio,0)-1)<1e-9,pl.reduce((s,x)=>s+x.ratio,0));
+  ok("plan_prepay_due",pl[0].due_date==="2025-06-01",pl[0].due_date);
+  ok("plan_warranty_due",pl[2].due_date==="2027-08-05",pl[2].due_date);
+  ok("plan_amount",pl[0].amount===300000,pl[0].amount);
+  const c2={id:"c2",total_amount:50000,contract_delivery_date:"2026-09-01",pay_condition_text:"月结30天"};
+  const cc2=calcContract(c2,[],[],[],[]);
+  const pl2=genPlan(c2,cc2);
+  ok("plan_monthly",pl2.length===1&&pl2[0].due_date==="2026-10-01",JSON.stringify(pl2));
+  const pl3=genPlan({id:"c3",total_amount:100,pay_condition_text:""},calcContract({id:"c3",total_amount:100},[],[],[],[]));
+  ok("plan_blank",pl3.length===1&&pl3[0].ratio===1,JSON.stringify(pl3));
+
+  /* 7. 增删改查落盘 */
+  await be.insert("contracts",Object.assign({},c1));
+  await be.insert("materials",Object.assign({},m1));
+  await be.update("contracts","c1",{logistics_owner:"张伟"});
+  ok("crud_update",be.all("contracts")[0].logistics_owner==="张伟");
+  const be2=await LocalBackend.init();
+  ok("persist",be2.all("contracts").length===1&&be2.all("contracts")[0].logistics_owner==="张伟",be2.all("contracts").length);
+  await be.remove("contracts","c1");
+  ok("crud_remove",be.all("contracts").length===0);
+}catch(e){ L.push("FAIL exception "+e.message+" @"+String(e.stack||"").split("\n")[1]) }
+const fails=L.filter(x=>x.startsWith("FAIL")).length;
+const out=(fails?"FAILED("+fails+")":"ALLPASS")+"\n"+L.join("\n");
+document.title=out.split("\n")[0];
+try{ await fetch("/report",{method:"POST",body:out}) }catch(e){}
+
+})();
+</script>

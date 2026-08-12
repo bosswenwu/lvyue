@@ -1,0 +1,152 @@
+<!doctype html><meta charset="utf-8"><title>e2e</title>
+<iframe id="f" src="index.html" style="width:1400px;height:900px;border:0"></iframe>
+<script>
+const L=[];const ok=(n,c,x)=>L.push((c?"PASS":"FAIL")+" "+n+(c?"":"  <"+x+">"));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||8000)){let v;try{v=fn()}catch(e){}if(v)return v;await sleep(80)}throw new Error("等待超时: "+label)}
+(async()=>{
+ try{
+  await new Promise(r=>indexedDB.deleteDatabase("lvyue_cloud").onsuccess=r.onerror=r);
+  localStorage.removeItem("lvyue_cloud_cfg"); sessionStorage.clear();
+  const f=document.getElementById("f"); f.src="index.html?"+Date.now();
+  await new Promise(r=>f.onload=r);
+  await until(()=>f.contentWindow.LY,"LY 调试入口");
+  const w0=f.contentWindow, w=w0.LY, $=s=>w0.document.querySelector(s), $$=s=>[...w0.document.querySelectorAll(s)];
+
+  /* 1. 首次运行建管理员 */
+  await until(()=>$("#doInit"),"首次运行界面");
+  $("#iU").value="admin"; $("#iN").value="何祥财";
+  $("#doInit").click();
+  await until(()=>$("#doLoginNow"),"随机密码卡片");
+  const pw=$("#doLoginNow").dataset.p;
+  ok("first_run_pw",pw&&pw.length===12,pw);
+  ok("pw_shown_once",$(".cred code")!=null);
+  $("#doLoginNow").click();
+  await until(()=>!$("#app").hidden,"进入系统");
+  ok("logged_in",w0.LY.ME&&w0.LY.ME.role==="admin",JSON.stringify(w0.LY.ME));
+  ok("admin_sees_users",!$("#navUsers").hidden);
+
+  /* 2. 导入合同台账 */
+  const head=["合同号","订单编号","供应商","合同名称","合同总额","签订日期","约定交期","承诺交期","付款条件","已到货金额","已开票金额","已支付金额"].join("\t");
+  const rows=[
+   ["HT-001","CD001","甲金属","钢材","1,000,000.00","2025/6/1","2026/8/5","2026/8/5","预付30%，货到付60%，质保金10%","0","0","0"],
+   ["HT-002","CD002","乙设备","设备","200000","2025/7/1","2026/9/20","","月结30天","200000","200000","0"],
+   ["HT-003","CD003","丙五金","五金","50000","2025/7/2","2026/8/13","2026/8/13","货到付100%","0","0","0"]
+  ].map(r=>r.join("\t"));
+  $("#pasteBox").value=[head,...rows].join("\n");
+  w.preview($("#pasteBox").value);
+  await until(()=>$("#doImport"),"导入预览");
+  ok("preview_detect",$("#importPreview").textContent.includes("合同台账表"),$("#importPreview").textContent.slice(0,40));
+  await w.doImport();
+  ok("import_count",w0.LY.Store.be.all("contracts").length===3,w0.LY.Store.be.all("contracts").length);
+  const c1=w0.LY.Store.be.all("contracts").find(c=>c.contract_no==="HT-001");
+  ok("import_date_norm",c1.promised_delivery_date==="2026-08-05",c1.promised_delivery_date);
+  ok("import_amount",c1.total_amount===1000000,c1.total_amount);
+  const c2=w0.LY.Store.be.all("contracts").find(c=>c.contract_no==="HT-002");
+  ok("import_opening_balance",w0.LY.Store.be.all("arrivals").filter(a=>a.contract_id===c2.id).length===1,"期初到货条数");
+
+  /* 3. 导入物料明细 */
+  const mh=["合同号","供应商","行号","物料编码","物料名称","规格型号","单位","订购数量","含税单价","价税合计"].join("\t");
+  const mrows=[
+   ["HT-001","甲金属","10","M001","方管","50*50*3","千克","100000","6.00","600000"],
+   ["HT-001","甲金属","20","M002","螺栓","M16","套","20000","20.00","400000"],
+   ["HT-003","丙五金","10","M003","法兰","DN100","个","500","100.00","50000"]
+  ].map(r=>r.join("\t"));
+  $("#pasteBox").value=[mh,...mrows].join("\n");
+  w.preview($("#pasteBox").value);
+  ok("preview_detect_mat",$("#importPreview").textContent.includes("物料明细表"),$("#importPreview").textContent.slice(0,40));
+  await w.doImport();
+  ok("mat_count",w0.LY.Store.be.all("materials").length===3,w0.LY.Store.be.all("materials").length);
+
+  /* 4. 打开合同，按物料行登记到货 */
+  w.go("list");
+  ok("list_rows",$$("#tb tr").length===3,$$("#tb tr").length);
+  w.openD(c1.id);
+  await until(()=>$("#dhead").textContent.includes("HT-001"),"抽屉");
+  w.tabI=1; w.drawTab();
+  ok("drawer_lines",$("#dbody").textContent.includes("方管"));
+  w.regModal("到货");
+  await until(()=>$$(".lineQty").length===2,"到货行输入框");
+  ok("arr_prefill",$$(".lineQty")[0].value==="100000",$$(".lineQty")[0].value);
+  $$(".lineQty")[0].value="60000";      // 方管只到 6 万
+  $$(".lineQty")[1].value="20000";      // 螺栓全到
+  $("#aNo").value="GR-2026-001";
+  await w.saveArrLines();
+  const v1=w0.LY.Store.view().find(v=>v.o.id===c1.id);
+  ok("arr_amount",Math.abs(v1.c.arr-(60000*6+20000*20))<0.01,v1.c.arr);
+  ok("arr_pct",Math.abs(v1.c.arrPct-0.76)<1e-9,v1.c.arrPct);
+  ok("arr_status",v1.c.arrS==="部分到货",v1.c.arrS);
+  ok("short_line",v1.c.shortLines.length===1&&v1.c.shortLines[0].short===40000,JSON.stringify(v1.c.shortLines.map(l=>l.short)));
+  const expLate=Math.max(0,Math.round((new Date(new Date().toDateString())-new Date("2026-08-05T00:00:00"))/864e5));
+  ok("still_late",v1.c.late===expLate,v1.c.late+" 期望 "+expLate);
+
+  /* 5. 催货清单 */
+  w.go("short");
+  ok("short_page",$$("#shortTb tr").length===1,$$("#shortTb tr").length);
+  ok("short_amt",$("#shortCnt").textContent.includes("24.0万"),$("#shortCnt").textContent);
+
+  /* 6. 付款计划 */
+  w.openD(c1.id); w.tabI=2; w.drawTab();
+  await until(()=>$("[data-act='genplan']"),"生成计划按钮");
+  $("[data-act='genplan']").click();
+  await until(()=>w0.LY.Store.be.all("payplans").length===3,"付款节点");
+  const pls=w0.LY.Store.be.all("payplans").filter(p=>p.contract_id===c1.id);
+  ok("plan_count",pls.length===3,pls.length);
+  ok("plan_sum",Math.abs(pls.reduce((s,p)=>s+p.amount,0)-1000000)<0.01,pls.reduce((s,p)=>s+p.amount,0));
+  ok("plan_prepay",pls.find(p=>p.name==="预付款").due_date==="2025-06-01",pls.find(p=>p.name==="预付款").due_date);
+
+  /* 7. 按节点登记付款 */
+  w.drawTab();
+  await until(()=>$("[data-paynode]"),"节点付款按钮");
+  $("[data-paynode]").click();
+  await until(()=>$("#eAmt"),"付款弹窗");
+  const planId=$("[data-act='saveEvent']").dataset.plan;
+  ok("modal_prefill",w.num($("#eAmt").value)>0,$("#eAmt").value);
+  $("#eNo").value="PAY-001";
+  await w.saveEvent("付款",planId);
+  const v2=w0.LY.Store.view().find(v=>v.o.id===c1.id);
+  ok("pay_recorded",v2.c.paid===300000,v2.c.paid);
+  ok("pay_owe",v2.c.owe===700000,v2.c.owe);
+  ok("plan_marked_paid",w0.LY.Store.be.all("payplans").find(p=>p.id===planId).paid===1);
+
+  /* 8. 现金流分桶 */
+  w.go("cash");
+  const B=w.cashBuckets(12);
+  ok("cash_has_overdue",B[0]>0,B[0]);
+  ok("cash_total",Math.abs(B.reduce((a,b)=>a+b,0))>0,B.join(","));
+
+  /* 9. 附件存取 */
+  const rec=await w0.LY.Store.be.insert("attachments",{contract_id:c1.id,name:"合同.pdf",size:12,type:"application/pdf",by:"何祥财",at:w.nowTS()});
+  await w0.LY.Store.be.putFile(rec.id,"data:text/plain;base64,aGVsbG8gd29ybGQ=");
+  const back=await w0.LY.Store.be.getFile(rec.id);
+  ok("file_roundtrip",back==="data:text/plain;base64,aGVsbG8gd29ybGQ=",String(back).slice(0,30));
+
+  /* 10. 用户管理：新建账号拿随机密码 */
+  w.go("users");
+  w.newUserModal();
+  await until(()=>$("#nuU"),"新建账号弹窗");
+  $("#nuU").value="liuyang"; $("#nuN").value="刘洋";
+  await w.createUser();
+  await until(()=>$("#newCred").textContent.includes("liuyang"),"密码卡片");
+  const np=$("#newCred").querySelectorAll("code")[1].textContent;
+  ok("new_user_pw",np.length===12&&!/[0O1lI]/.test(np),np);
+  ok("user_row",$$("#userTb tr").length===2,$$("#userTb tr").length);
+  const who=await w0.LY.Store.be.login("liuyang",np);
+  ok("new_user_can_login",who.username==="liuyang",JSON.stringify(who));
+
+  /* 11. 留痕 */
+  const audit=w0.LY.Store.be.all("audit").filter(a=>a.contract_id===c1.id);
+  ok("audit_trail",audit.length>=3,audit.length+"条: "+audit.map(a=>a.what).join(" / ").slice(0,90));
+
+  /* 12. 各页面渲染无异常 */
+  ["home","list","alert","cash","short","data"].forEach(p=>w.go(p));
+  ok("all_pages_render",true);
+  ok("kpi_rendered",$("#kpis").children.length===4,$("#kpis").children.length);
+
+ }catch(e){ L.push("FAIL 异常 "+e.message+" @"+String(e.stack||"").split("\n").slice(1,3).join(" | ")) }
+ const fails=L.filter(x=>x.startsWith("FAIL")).length;
+ const out=(fails?"FAILED("+fails+")":"ALLPASS("+L.length+")")+"\n"+L.join("\n");
+ try{ await fetch("/report",{method:"POST",body:out}) }catch(e){}
+ document.title="done";
+})();
+</script>
