@@ -1,0 +1,71 @@
+<!doctype html><meta charset="utf-8"><title>login</title>
+<iframe id="f" style="width:1200px;height:800px;border:0"></iframe>
+<script>
+const L=[];const ok=(n,c,x)=>L.push((c?"PASS":"FAIL")+" "+n+(c?"":"  <"+x+">"));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||8000)){let v;try{v=fn()}catch(e){}if(v)return v;await sleep(80)}throw new Error("超时: "+label)}
+const vis=(w,sel)=>{const el=w.document.querySelector(sel);if(!el)return false;const s=w.getComputedStyle(el);return s.display!=="none"&&s.visibility!=="hidden"};
+(async()=>{
+ try{
+  await new Promise(r=>indexedDB.deleteDatabase("lvyue_cloud").onsuccess=r.onerror=r);
+  const f=document.getElementById("f");
+  f.src="index.html?a="+Date.now(); await new Promise(r=>f.onload=r);
+  let w=f.contentWindow;
+  await until(()=>w.document.querySelector("#doInit"),"首次运行");
+  w.document.querySelector("#iU").value="admin";
+  w.document.querySelector("#iN").value="何祥财";
+  w.document.querySelector("#doInit").click();
+  await until(()=>w.document.querySelector("#doLoginNow"),"密码卡");
+  const pw=w.document.querySelector("#doLoginNow").dataset.p;
+
+  /* 关键：首次进入后，登录层必须真的看不见 */
+  w.document.querySelector("#doLoginNow").click();
+  await until(()=>w.LY&&w.LY.ME,"进入系统");
+  await sleep(300);
+  ok("首次进入_登录层已隐藏",!vis(w,"#gate"),"computed display="+w.getComputedStyle(w.document.querySelector("#gate")).display);
+  ok("首次进入_主界面可见",vis(w,".app"));
+
+  /* 重新加载，走真正的登录表单 */
+  try{w.sessionStorage.clear()}catch(e){}; f.src="index.html?b="+Date.now(); await new Promise(r=>f.onload=r);
+  w=f.contentWindow;
+  await until(()=>w.document.querySelector("#doLogin"),"登录表单");
+  ok("重载后_显示登录表单",vis(w,"#gate"));
+  w.document.querySelector("#iU").value="admin";
+  w.document.querySelector("#iP").value=pw;
+  w.document.querySelector("#doLogin").click();       // 真实点击
+  await until(()=>w.LY&&w.LY.ME,"登录成功",6000).catch(()=>{});
+  await sleep(400);
+  ok("点登录_登录成功",!!(w.LY&&w.LY.ME),"ME="+JSON.stringify(w.LY&&w.LY.ME));
+  ok("点登录_登录层消失",!vis(w,"#gate"),"computed display="+w.getComputedStyle(w.document.querySelector("#gate")).display);
+  ok("点登录_主界面可见",vis(w,".app"));
+  ok("点登录_能看到工作台",w.document.querySelector("#kpis").children.length===4,w.document.querySelector("#kpis").children.length);
+
+  /* 密码错误要有提示 */
+  try{w.sessionStorage.clear()}catch(e){}; f.src="index.html?c="+Date.now(); await new Promise(r=>f.onload=r);
+  w=f.contentWindow;
+  await until(()=>w.document.querySelector("#doLogin"),"登录表单2");
+  w.document.querySelector("#iU").value="admin";
+  w.document.querySelector("#iP").value="wrong-password";
+  w.document.querySelector("#doLogin").click();
+  await sleep(600);
+  ok("密码错_有红色提示",w.document.querySelector("#loginErr").textContent.length>0,w.document.querySelector("#loginErr").textContent);
+  ok("密码错_仍停在登录页",vis(w,"#gate"));
+
+  /* 弹窗与抽屉也要真的能隐藏 */
+  try{w.sessionStorage.clear()}catch(e){}; f.src="index.html?d="+Date.now(); await new Promise(r=>f.onload=r);
+  w=f.contentWindow;
+  await until(()=>w.document.querySelector("#doLogin"),"登录表单3");
+  w.document.querySelector("#iU").value="admin"; w.document.querySelector("#iP").value=pw;
+  w.document.querySelector("#doLogin").click();
+  await until(()=>w.LY&&w.LY.ME,"登录3");
+  await sleep(200);
+  w.LY.go("list");
+  ok("台账页可见",vis(w,"#p-list"));
+  ok("工作台已隐藏",!vis(w,"#p-home"),"display="+w.getComputedStyle(w.document.querySelector("#p-home")).display);
+ }catch(e){ L.push("FAIL 异常 "+e.message) }
+ const fails=L.filter(x=>x.startsWith("FAIL")).length;
+ const out=(fails?"FAILED("+fails+")":"ALLPASS("+L.length+")")+"\n"+L.join("\n");
+ try{ await fetch("/report",{method:"POST",body:out}) }catch(e){}
+ document.title="done";
+})();
+</script>

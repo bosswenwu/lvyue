@@ -29,6 +29,9 @@
   --ok:#2F7D52;--ok-soft:#E4F1E9;--warn:#9A6B12;--warn-soft:#F7EDD8;
   --crit:#A6321F;--crit-soft:#F8E4E0;--info:#2B5F8C;--info-soft:#E3EDF6;}
 *{box-sizing:border-box}
+/* 必须放在所有 display 声明之前生效：.gate/.app 等自带 display:grid，
+   会盖掉浏览器给 [hidden] 的 display:none，导致"隐藏"了却还看得见 */
+[hidden]{display:none!important}
 body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--font-sans);font-size:13px;line-height:1.5;-webkit-font-smoothing:antialiased}
 button,input,select,textarea{font:inherit;color:inherit}
 input[type=checkbox]{accent-color:var(--accent)}
