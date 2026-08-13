@@ -100,6 +100,13 @@
           <div class="bar"><button class="btn pri" id="doParse">解析并预览</button><button class="btn" id="pickFile">选择文件</button></div>
           <div id="importPreview"></div>
         </div></div>
+        <div class="card"><header><h2>批量上传附件</h2></header><div style="padding:14px;display:flex;flex-direction:column;gap:12px">
+          <div class="hint"><b>做法：</b>把合同扫描件、装箱单、发票一次全选拖进来，系统按<b>文件名里的合同号</b>自动归到对应合同下。
+          比如 <code>HCMH20250516-02 装箱单.pdf</code> 会自动挂到合同 HCMH20250516-02。认不出的会列出来让你手动指定。</div>
+          <div class="drop" id="attBulkDrop">把 PDF / 图片 / Word / Excel 拖进来，或点这里选择（可多选）</div>
+          <input type="file" id="attBulkFile" multiple hidden>
+          <div id="attBulkPreview"></div>
+        </div></div>
         <div style="display:flex;flex-direction:column;gap:14px">
           <div class="card"><header><h2>备份 / 还原</h2></header><div style="padding:14px;display:flex;flex-direction:column;gap:10px">
             <p class="muted">本机模式下数据在这台电脑的浏览器里，请定期备份。</p>

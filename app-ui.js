@@ -592,6 +592,91 @@ async function doImport(){
   $("#importPreview").innerHTML=`<div class="hint">导入完成：新增 <b>${added}</b> 份，更新 <b>${updated}</b> 份${mats?`，物料 <b>${mats}</b> 行`:""}${arrN?`，期初金额 <b>${arrN}</b> 条`:""}。</div>`;
   $("#pasteBox").value="";PENDING=null;reload();renderData();say("导入完成");
 }
+/* ---------- 批量上传附件：按文件名里的合同号自动归档 ---------- */
+let BULK=null;   // [{file, contractId|null, reason}]
+/* 用合同号/订单编号去文件名里找。取最长匹配，避免 "HT-1" 命中 "HT-12" 这种误伤。
+   比较时统一去掉大小写和常见分隔符，容忍 "HCMH2025 0516-02" 这类手工命名。 */
+function normKey(s){ return String(s||"").toUpperCase().replace(/[\s_\-—－]/g,"") }
+function matchFileToContract(fileName,rows){
+  const nk=normKey(fileName);
+  let best=null,bestLen=0;
+  for(const {o} of rows){
+    for(const [field,label] of [[o.contract_no,"合同号"],[o.order_no,"订单编号"]]){
+      const key=normKey(field);
+      if(key.length<4)continue;             // 太短的编号不参与匹配，误命中风险高
+      if(nk.includes(key)&&key.length>bestLen){ best={id:o.id,by:label,hit:field}; bestLen=key.length }
+    }
+  }
+  return best;
+}
+function bulkPickFiles(files){
+  const rows=VIEWDATA.filter(x=>!x.o.is_void);
+  BULK=[...files].map(f=>{
+    const m=matchFileToContract(f.name,rows);
+    return {file:f, contractId:m?m.id:null, by:m?m.by:null, hit:m?m.hit:null,
+            tooBig:f.size>8*1024*1024};
+  });
+  renderBulkPreview();
+}
+function bulkSummary(){
+  const okN=BULK.filter(b=>b.contractId&&!b.tooBig).length;
+  const badN=BULK.filter(b=>b.tooBig).length;
+  const unmatchedN=BULK.filter(b=>!b.contractId&&!b.tooBig).length;
+  return {okN,badN,unmatchedN,
+    html:`<div class="${unmatchedN||badN?"warnbox":"hint"}">共 ${BULK.length} 个文件：<b>${okN}</b> 个待上传${unmatchedN?`，<b>${unmatchedN}</b> 个没认出合同号（在下面手动选）`:""}${badN?`，<b>${badN}</b> 个超过 8MB 无法上传`:""}。</div>`};
+}
+/* 只在文件集合变化时重建表格；改下拉框时走 refreshBulkCounts()，
+   否则整表重绘会让刚点开的下拉框失焦、列表跳回顶部。 */
+function renderBulkPreview(){
+  const box=$("#attBulkPreview");
+  if(!BULK||!BULK.length){ box.innerHTML=""; return }
+  const rows=VIEWDATA.filter(x=>!x.o.is_void)
+    .sort((a,b)=>String(a.o.contract_no).localeCompare(String(b.o.contract_no)));
+  const opts=id=>`<option value="">— 跳过，不上传 —</option>`+rows.map(({o})=>
+    `<option value="${o.id}"${o.id===id?" selected":""}>${esc(o.contract_no)} · ${esc(o.supplier_name)}</option>`).join("");
+  const s=bulkSummary();
+  box.innerHTML=`<div id="bulkSum">${s.html}</div>
+    <div class="tw" style="max-height:300px;overflow:auto"><table><thead><tr>
+      <th class="no">文件名</th><th class="no r">大小</th><th class="no">归到哪份合同</th></tr></thead>
+    <tbody>${BULK.map((b,i)=>`<tr>
+      <td>${esc(b.file.name)}${b.by?`<div style="color:var(--ink-3);font-size:11px">按${b.by}匹配到 ${esc(b.hit)}</div>`:""}</td>
+      <td class="r num">${(b.file.size/1024).toFixed(0)} KB</td>
+      <td>${b.tooBig?`<span class="pill crit">超过 8MB，跳过</span>`
+        :`<select data-bulkpick="${i}" style="max-width:280px;border:1px solid var(--line);border-radius:4px;padding:3px 6px;background:var(--surface-2)">${opts(b.contractId)}</select>`}</td>
+    </tr>`).join("")}</tbody></table></div>
+    <div class="bar"><button class="btn pri" id="doBulkAtt"${s.okN?"":" disabled"}>上传这 ${s.okN} 个文件</button>
+    <button class="btn" id="cancelBulkAtt">取消</button></div>`;
+}
+function refreshBulkCounts(){
+  if(!BULK)return;
+  const s=bulkSummary();
+  const sum=$("#bulkSum"); if(sum)sum.innerHTML=s.html;
+  const btn=$("#doBulkAtt"); if(btn){ btn.disabled=!s.okN; btn.textContent=`上传这 ${s.okN} 个文件` }
+}
+async function doBulkAttach(){
+  const todo=BULK.filter(b=>b.contractId&&!b.tooBig);
+  if(!todo.length)return say("没有可上传的文件");
+  const btn=$("#doBulkAtt"); if(btn){btn.disabled=true;btn.textContent="上传中…"}
+  let done=0,failed=[];
+  const byContract={};
+  for(const b of todo){
+    try{
+      const dataUrl=await new Promise((ok,no)=>{const fr=new FileReader();fr.onload=()=>ok(fr.result);fr.onerror=()=>no(new Error("读取失败"));fr.readAsDataURL(b.file)});
+      const rec=await Store.be.insert("attachments",{contract_id:b.contractId,name:b.file.name,
+        size:b.file.size,type:b.file.type,by:(ME&&ME.name)||"",at:nowTS()});
+      await Store.be.putFile(rec.id,dataUrl);
+      (byContract[b.contractId]=byContract[b.contractId]||[]).push(b.file.name);
+      done++;
+      if(btn)btn.textContent=`上传中… ${done}/${todo.length}`;
+    }catch(e){ failed.push(b.file.name+"（"+e.message+"）") }
+  }
+  for(const [cid,names] of Object.entries(byContract)) await logIt(cid,"批量上传附件 "+names.join("、"));
+  BULK=null; reload();
+  $("#attBulkPreview").innerHTML=`<div class="${failed.length?"warnbox":"hint"}">
+    已上传 <b>${done}</b> 个附件，归到 ${Object.keys(byContract).length} 份合同下。
+    ${failed.length?`<br>失败 ${failed.length} 个：${esc(failed.join("；"))}`:""}</div>`;
+  renderData(); say(`已上传 ${done} 个附件`);
+}
 function renderData(){
   const n=Store.be.all("contracts").length,m=Store.be.all("materials").length;
   const ev=Store.be.all("arrivals").length+Store.be.all("invoices").length+Store.be.all("payments").length;
@@ -726,6 +811,9 @@ document.addEventListener("click",async e=>{
       await logIt(curId,"删除附件"); reload();drawTab();say("已删除");return;
     }
     if(t.id==="attDrop")return $("#attFile").click();
+    if(t.id==="attBulkDrop")return $("#attBulkFile").click();
+    if(t.id==="doBulkAtt")return doBulkAttach();
+    if(t.id==="cancelBulkAtt"){BULK=null;$("#attBulkPreview").innerHTML="";return}
     const ru=t.closest("[data-resetu]"); if(ru)return resetUser(ru.dataset.resetu);
     const tu=t.closest("[data-toggleu]"); if(tu){
       const u=Store.be.all("users").find(z=>z.id===tu.dataset.toggleu);
@@ -806,6 +894,9 @@ document.addEventListener("click",async e=>{
 document.addEventListener("change",async e=>{
   if(e.target.id==="fVoid")return renderList();
   if(e.target.id==="shortLateOnly")return renderShort();
+  if(e.target.id==="attBulkFile"){const fs=[...e.target.files];if(fs.length)bulkPickFiles(fs);return}
+  const bp=e.target.closest&&e.target.closest("[data-bulkpick]");
+  if(bp&&BULK){ BULK[+bp.dataset.bulkpick].contractId=bp.value||null; return refreshBulkCounts() }
   if(e.target.id==="file"){const f=e.target.files[0];if(!f)return;return loadImportFile(f)}
   if(e.target.id==="restoreFile"){const f=e.target.files[0];if(!f)return;const r=new FileReader();
     r.onload=async()=>{try{
@@ -844,6 +935,7 @@ document.addEventListener("drop",async e=>{
   const dz=e.target.closest(".drop");if(!dz)return;e.preventDefault();dz.classList.remove("hot");
   const f=e.dataTransfer.files[0];if(!f)return;
   if(dz.id==="attDrop"){$("#attFile").files=e.dataTransfer.files;$("#attFile").dispatchEvent(new Event("change",{bubbles:true}));return}
+  if(dz.id==="attBulkDrop"){ const fs=[...e.dataTransfer.files]; if(fs.length)bulkPickFiles(fs); return }
   return loadImportFile(f);
 });
 
@@ -871,6 +963,8 @@ window.LY={
   num,iso,fmt,wan,nowTS,normDate,randPw,hashPw,genPlan,calcContract,parseTable,emptyDB,
   cashBuckets,CUR,go,openD,shutD,drawTab,drawHead,regModal,saveArrLines,saveEvent,
   saveContract,editContract,preview,doImport,genPlansFor,createUser,newUserModal,
+  matchFileToContract,bulkPickFiles,doBulkAttach,loadImportFile,xlsxToTSV,
+  get BULK(){return BULK}, set BULK(v){BULK=v},
   resetUser,renderUsers,shortRows,filtered,reload,refreshPage
 };
 
