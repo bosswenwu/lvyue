@@ -8,6 +8,7 @@ const vis=(w,sel)=>{const el=w.document.querySelector(sel);if(!el)return false;c
 (async()=>{
  try{
   await new Promise(r=>indexedDB.deleteDatabase("lvyue_cloud").onsuccess=r.onerror=r);
+  localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({forceLocal:true}));
   const f=document.getElementById("f");
   f.src="index.html?a="+Date.now(); await new Promise(r=>f.onload=r);
   let w=f.contentWindow;

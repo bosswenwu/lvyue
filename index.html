@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>履约云 · 采购合同履约管理</title>
 <link rel="stylesheet" href="style.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 </head>
 <body>
 
@@ -94,8 +95,8 @@
         <div class="card"><header><h2>导入</h2></header><div style="padding:14px;display:flex;flex-direction:column;gap:12px">
           <div class="hint"><b>做法：</b>原系统「导出 Excel」→ Excel 打开 → 全选 Ctrl+A → 复制 Ctrl+C → 粘贴到下面。合同表和物料明细表都认，按合同号合并。</div>
           <textarea class="paste" id="pasteBox" placeholder="粘贴 Excel 内容（要带表头行）…"></textarea>
-          <div class="drop" id="drop">或把 CSV / TSV 文件拖进来</div>
-          <input type="file" id="file" accept=".csv,.tsv,.txt" hidden>
+          <div class="drop" id="drop">或把 Excel（.xlsx）/ CSV / TSV 文件拖进来</div>
+          <input type="file" id="file" accept=".csv,.tsv,.txt,.xlsx,.xls" hidden>
           <div class="bar"><button class="btn pri" id="doParse">解析并预览</button><button class="btn" id="pickFile">选择文件</button></div>
           <div id="importPreview"></div>
         </div></div>

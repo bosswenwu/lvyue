@@ -7,6 +7,7 @@ async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||8
 (async()=>{
 try{
   await new Promise(r=>indexedDB.deleteDatabase("lvyue_cloud").onsuccess=r.onerror=r);
+  localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({forceLocal:true}));
   const f=document.getElementById("f");
   f.src="index.html?"+Date.now(); await new Promise(r=>f.onload=r);
   const w=f.contentWindow, $=s=>w.document.querySelector(s);

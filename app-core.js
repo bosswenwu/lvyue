@@ -107,9 +107,28 @@ const LocalBackend={
    云端后端（Supabase）
    表结构见 schema.sql；鉴权用 Supabase Auth，数据走 PostgREST
    ============================================================ */
+/* 团队默认的云端项目，写死在代码里——这样任何人打开这个网址，
+   不管什么设备什么浏览器，都默认连同一个云端库，不用每人手动
+   在「数据管理」里填一遍地址和 key（之前就是因为这个，同一个人
+   换个浏览器就会被当成本机模式，看到的是"建管理员"而不是登录框）。
+   要接到别的 Supabase 项目，就改这两个值，或者仍然可以用
+   「数据管理→接入云端」在某台设备上临时覆盖（存那台设备的浏览器里）。 */
+const DEFAULT_CLOUD_CFG={
+  url:"https://acvpjtlokrygvnwuuewr.supabase.co",
+  key:"sb_publishable_j81sdF6Rd1lW_QVf_dZ1Kw_BSlYtA3N"
+};
 const CloudBackend={
   kind:"cloud", url:null, key:null, token:null, user:null, data:null,
-  cfg(){ try{return JSON.parse(localStorage.getItem("lvyue_cloud_cfg")||"null")}catch(e){return null} },
+  cfg(){
+    /* forceLocal 是显式"我就要本机模式"的标记（数据管理页「断开，改回本机」按钮写入）。
+       光是删掉本地覆盖值不够——那样会落回下面的默认云端配置，等于点了没用。 */
+    try{
+      const s=JSON.parse(localStorage.getItem("lvyue_cloud_cfg")||"null");
+      if(s&&s.forceLocal) return null;
+      if(s&&s.url&&s.key) return s;
+    }catch(e){}
+    return DEFAULT_CLOUD_CFG.url?DEFAULT_CLOUD_CFG:null;
+  },
   async init(cfg){
     cfg=cfg||this.cfg(); if(!cfg||!cfg.url||!cfg.key)throw new Error("未配置云端");
     this.url=cfg.url.replace(/\/+$/,""); this.key=cfg.key;
@@ -150,18 +169,46 @@ const CloudBackend={
     const j=await r.json();
     this.token=j.access_token;
     const meta=j.user.user_metadata||{};
-    this.user={id:j.user.id,username:email,name:meta.name||email,role:meta.role||"user"};
+    /* role 绝不从这里的 metadata 取——那是登录时客户端自己传的，任何人都能伪造。
+       真正的角色权威来源是数据库里的 profiles 表，见 fetchProfile()。 */
+    this.user={id:j.user.id,username:email,name:meta.name||email,role:"user"};
+    await this.fetchProfile();
+    return this.user;
+  },
+  /* 权限的唯一可信来源：profiles 表由 handle_new_user 触发器写入，
+     注册时客户端传什么 role 字段都不会被数据库采纳。
+     如果 schema_v2_roles.sql 还没在 Supabase 项目里跑过（表不存在），
+     不阻断登录——退回「按成员处理」，不锁任何人在外面；等表建好了
+     下次登录会自动切换成数据库校验的真实角色，不需要谁再做什么。 */
+  async fetchProfile(){
+    try{
+      const rows=await this.rest("profiles?id=eq."+this.user.id+"&select=role,disabled,name");
+      const p=rows&&rows[0];
+      if(!p) console.warn("这个账号还没有权限记录，暂时按「成员」处理，管理员可在「用户管理」或 Supabase 后台补上");
+      else{
+        if(p.disabled) throw new Error("该账号已被管理员停用");
+        this.user.role=p.role; this.user.name=p.name||this.user.name;
+      }
+    }catch(e){
+      if(/已被管理员停用/.test(e.message)) throw e; // 停用是真错误，必须拦下
+      console.warn("profiles 表还不可用（可能没跑 schema_v2_roles.sql），暂时按「成员」处理：",e.message);
+    }
     localStorage.setItem("lvyue_sess",JSON.stringify({token:this.token,user:this.user}));
     return this.user;
   },
+  async setUserRole(targetId,newRole,newDisabled){
+    await this.rest("rpc/set_user_role",{method:"POST",body:JSON.stringify({target_id:targetId,new_role:newRole,new_disabled:newDisabled})});
+  },
   logout(){ this.token=null; this.user=null; localStorage.removeItem("lvyue_sess") },
   /* 用 anon key 的 signUp 建号：管理员点一下就生成账号+随机密码。
-     email 必须是真实可达的邮箱域名（不必是本人常用邮箱，但域名要存在）。 */
-  async createUser({username,name,role,password}){
+     email 必须是真实可达的邮箱域名（不必是本人常用邮箱，但域名要存在）。
+     新账号一律从「成员」开始——role 字段即使传了也会被数据库触发器忽略，
+     要升管理员必须已登录的管理员调用 setUserRole()。 */
+  async createUser({username,name,password}){
     const email=String(username||"").trim();
     if(!email.includes("@"))throw new Error("云端模式下账号是邮箱地址，请输入完整邮箱，例如 zhangsan@qq.com");
     const r=await fetch(this.url+"/auth/v1/signup",{method:"POST",headers:{apikey:this.key,"Content-Type":"application/json"},
-      body:JSON.stringify({email,password,data:{name,role:role||"user",username:email}})});
+      body:JSON.stringify({email,password,data:{name}})});
     if(!r.ok){
       const body=await r.json().catch(()=>({}));
       if(body.error_code==="email_address_invalid")throw new Error("这个邮箱地址被判定为无效，换一个真实域名的邮箱试试（如 qq.com / 163.com / gmail.com）");

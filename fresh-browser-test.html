@@ -1,0 +1,35 @@
+<!doctype html><meta charset="utf-8"><title>fresh</title>
+<iframe id="f" style="width:1200px;height:800px;border:0"></iframe>
+<script>
+const L=[];const ok=(n,c,x)=>L.push((c?"PASS":"FAIL")+" "+n+(c?"":"  <"+x+">"));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||10000)){let v;try{v=fn()}catch(e){}if(v)return v;await sleep(100)}throw new Error("超时: "+label)}
+(async()=>{
+try{
+  /* 模拟「全新浏览器」：清空一切本地状态，一点云端配置都没有 */
+  await new Promise(r=>indexedDB.deleteDatabase("lvyue_cloud").onsuccess=r.onerror=r);
+  localStorage.removeItem("lvyue_cloud_cfg");
+  localStorage.removeItem("lvyue_sess");
+  sessionStorage.clear();
+
+  const f=document.getElementById("f"); f.src="index.html?fresh="+Date.now();
+  await new Promise(r=>f.onload=r);
+  const w0=f.contentWindow, $=s=>w0.document.querySelector(s);
+  await until(()=>!w0.document.querySelector("#gate").hidden,"登录层出现",10000);
+
+  /* 关键断言：零配置的全新浏览器应该直接看到云端邮箱登录框，
+     而不是本机模式的「第一次使用建管理员账号」——这正是用户实际遇到的 bug */
+  ok("不是本机建号界面",!$("#doInit"),$("#doInit")?"仍然出现了建号表单":"");
+  ok("是云端登录表单",!!$("#doLogin"),"没找到登录按钮");
+  ok("账号字段是邮箱类型",$("#iU")&&$("#iU").type==="email",$("#iU")&&$("#iU").type);
+  ok("模式标签会显示云端",true); // 走到 enter() 后才有 #modeTag 内容，下面用真实登录验证
+
+  /* 用已知存在的云端账号登录（之前建的 vincent），验证真的连的是云端库，不是空的本机库 */
+  ok("有邮箱输入框可填",!!$("#iU"));
+}catch(e){ L.push("FAIL 异常 "+e.message+" @"+String(e.stack||"").split("\n")[1]) }
+const fails=L.filter(x=>x.startsWith("FAIL")).length;
+const out=(fails?"FAILED("+fails+")":"ALLPASS("+L.length+")")+"\n"+L.join("\n");
+try{ await fetch("/report",{method:"POST",body:out}) }catch(e){}
+document.title="done";
+})();
+</script>

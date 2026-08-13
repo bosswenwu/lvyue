@@ -52,7 +52,7 @@ async function boot(){
     else { await Store.useLocal(); $("#modeTag").textContent="本机"; }
   }catch(e){ await Store.useLocal(); $("#modeTag").textContent="本机"; }
   if(Store.be.kind==="cloud"&&CloudBackend.token){
-    try{ await CloudBackend.loadAll(); ME=CloudBackend.user; return enter(); }catch(e){ CloudBackend.logout(); }
+    try{ await CloudBackend.fetchProfile(); await CloudBackend.loadAll(); ME=CloudBackend.user; return enter(); }catch(e){ CloudBackend.logout(); }
   }
   const sess=(()=>{try{return JSON.parse(sessionStorage.getItem("ly_me")||"null")}catch(e){return null}})();
   if(Store.be.kind==="local"&&sess&&Store.be.all("users").some(u=>u.id===sess.id)){ ME=sess; return enter(); }
@@ -505,6 +505,41 @@ async function saveContract(id){
 }
 
 /* ================= 导入 ================= */
+const XLSX_EXT=/\.xlsx?$/i;
+/* 把 .xlsx/.xls 转成跟"从 Excel 里全选复制"完全一样的 TSV 文本，
+   这样后面复用一套 parseTable()，不用再单独维护一条二进制解析逻辑。
+   工作簿可能有好几个 sheet（比如我们自己发的导入模板），
+   挑表头里含"合同号"、且能对上系统字段最多的那个 sheet。 */
+function xlsxToTSV(arrayBuffer){
+  if(typeof XLSX==="undefined") throw new Error("Excel 解析库没加载成功，换成「全选复制→粘贴」的方式导入，或检查网络");
+  const wb=XLSX.read(arrayBuffer,{type:"array",cellDates:true});
+  let best=null,bestScore=-1,candidates=0;
+  for(const name of wb.SheetNames){
+    const tsv=XLSX.utils.sheet_to_csv(wb.Sheets[name],{FS:"\t",blankrows:false});
+    const head=(tsv.split("\n")[0]||"").split("\t").map(h=>h.trim().replace(/^﻿/,"").replace(/[▲▼①②③\s]/g,""));
+    if(!head.includes("合同号"))continue;
+    candidates++;
+    const score=head.filter(h=>MAP[h]).length;
+    if(score>bestScore){bestScore=score;best={name,tsv}}
+  }
+  if(!best) throw new Error("这个 Excel 文件里没有找到含「合同号」列的表，确认导出内容对不对，或改用「全选复制→粘贴」导入");
+  best.otherCandidates=candidates-1; // 除了选中的这个，还有几个 sheet 也像数据表
+  return best;
+}
+async function loadImportFile(f){
+  if(XLSX_EXT.test(f.name)){
+    try{
+      const buf=await f.arrayBuffer();
+      const {name,tsv,otherCandidates}=xlsxToTSV(buf);
+      $("#pasteBox").value=tsv; preview(tsv);
+      say(`已从「${name}」sheet 读取`+(otherCandidates>0?`（工作簿里还有 ${otherCandidates} 个 sheet 看起来也是数据表，没读，需要的话单独复制粘贴）`:""));
+    }catch(e){ $("#importPreview").innerHTML=`<div class="critbox">${esc(e.message)}</div>` }
+    return;
+  }
+  const r=new FileReader();
+  r.onload=()=>{$("#pasteBox").value=r.result;preview(r.result)};
+  r.readAsText(f,"utf-8");
+}
 function preview(text){
   const p=parseTable(text);
   const box=$("#importPreview");
@@ -570,11 +605,8 @@ function renderData(){
 }
 
 /* ================= 用户管理 ================= */
-function renderUsers(){
-  if(Store.be.kind==="cloud"){
-    $("#userTb").innerHTML=`<tr><td colspan="6" class="empty">云端模式下账号是邮箱，由 Supabase 统一管理。点右上角「新建账号」仍可在此建号；完整账号列表和重置密码要去 Supabase 后台 Authentication → Users 操作。</td></tr>`;
-    return;
-  }
+async function renderUsers(){
+  if(Store.be.kind==="cloud")return renderUsersCloud();
   const us=Store.be.all("users");
   $("#userTb").innerHTML=us.map(u=>`<tr><td class="mono">${esc(u.username)}</td><td>${esc(u.name||"")}</td>
     <td>${u.role==="admin"?'<span class="pill info">管理员</span>':'<span class="pill mute">成员</span>'}</td>
@@ -584,23 +616,41 @@ function renderUsers(){
     ${u.id===ME.id?"":`<button class="btn danger" data-toggleu="${u.id}" style="padding:2px 7px">${u.disabled?"启用":"停用"}</button>`}</td></tr>`).join("")
     ||`<tr><td colspan="6" class="empty">还没有其他账号</td></tr>`;
 }
+/* 云端模式的账号列表读自 profiles 表（有 RLS，任何登录用户可读）；
+   角色是数据库侧唯一权威，改角色/启停用都走 set_user_role() 这个函数，
+   该函数会先检查调用者自己是不是管理员，不是就直接拒绝——不依赖前端隐藏按钮。 */
+async function renderUsersCloud(){
+  $("#userTb").innerHTML=`<tr><td colspan="6" class="empty">加载中…</td></tr>`;
+  let rows;
+  try{ rows=await CloudBackend.rest("profiles?select=*&order=created_at.asc"); }
+  catch(e){ $("#userTb").innerHTML=`<tr><td colspan="6" class="empty">${esc(e.message)}<br>如果提示读不到 profiles 表，需要先在 Supabase 后台跑一遍 schema_v2_roles.sql。</td></tr>`; return; }
+  $("#userTb").innerHTML=rows.map(u=>`<tr><td class="mono">${esc(u.email)}</td><td>${esc(u.name||"")}</td>
+    <td>${u.role==="admin"?'<span class="pill info">管理员</span>':'<span class="pill mute">成员</span>'}</td>
+    <td class="mono">${esc(String(u.created_at||"").slice(0,16).replace("T"," "))}</td>
+    <td>${u.disabled?'<span class="pill crit">已停用</span>':'<span class="pill ok">正常</span>'}</td>
+    <td class="r">${u.id===ME.id?'<span style="color:var(--ink-3);font-size:11px">这是你自己</span>':`
+    <button class="btn" data-cloudrole="${u.id}" data-role="${u.role==="admin"?"user":"admin"}" data-disabled="${u.disabled}" style="padding:2px 7px">${u.role==="admin"?"设为成员":"设为管理员"}</button>
+    <button class="btn danger" data-cloudtoggle="${u.id}" data-role="${u.role}" data-disabled="${!u.disabled}" style="padding:2px 7px">${u.disabled?"启用":"停用"}</button>`}</td></tr>`).join("")
+    ||`<tr><td colspan="6" class="empty">还没有其他账号</td></tr>`;
+}
 function newUserModal(){
   const cloud=Store.be.kind==="cloud";
   modal("新建账号",`<div class="form">
     <label><span>${cloud?"邮箱":"账号"}</span><input id="nuU" type="${cloud?"email":"text"}" placeholder="${cloud?"zhangsan@qq.com":"拼音或工号"}"></label>
     <label><span>姓名</span><input id="nuN"></label>
-    <label><span>角色</span><select id="nuR"><option value="user">成员</option><option value="admin">管理员</option></select></label></div>
-    <div class="hint">${cloud?"云端模式下账号是邮箱地址（不需要本人能收信，只要域名真实存在，如 qq.com/163.com/gmail.com）。":""}密码由系统随机生成（12 位，去掉了容易看错的 0O1lI），创建后只显示一次。</div>`,
+    ${cloud?"":'<label><span>角色</span><select id="nuR"><option value="user">成员</option><option value="admin">管理员</option></select></label>'}</div>
+    <div class="hint">${cloud?"云端模式下账号是邮箱地址（不需要本人能收信，只要域名真实存在，如 qq.com/163.com/gmail.com）。新账号默认是「成员」，建完后可以在列表里把它设为管理员。":""}密码由系统随机生成（12 位，去掉了容易看错的 0O1lI），创建后只显示一次。</div>`,
     `<div class="spacer"></div><button class="btn" data-close>取消</button><button class="btn pri" data-act="createUser">创建</button>`);
 }
 async function createUser(){
-  const username=$("#nuU").value.trim(),name=$("#nuN").value.trim()||username,role=$("#nuR").value;
-  if(!username)return say(Store.be.kind==="cloud"?"邮箱必填":"账号必填");
-  if(Store.be.kind==="cloud"&&!username.includes("@"))return say("云端模式下账号是邮箱地址，请输入完整邮箱");
+  const cloud=Store.be.kind==="cloud";
+  const username=$("#nuU").value.trim(),name=$("#nuN").value.trim()||username,role=cloud?"user":$("#nuR").value;
+  if(!username)return say(cloud?"邮箱必填":"账号必填");
+  if(cloud&&!username.includes("@"))return say("云端模式下账号是邮箱地址，请输入完整邮箱");
   const pw=randPw(12);
   try{ await Store.be.createUser({username,name,role,password:pw}); }
   catch(e){ return say(e.message) }
-  closeModal();renderUsers();
+  closeModal();await renderUsers();
   $("#newCred").innerHTML=`<div class="cred"><div class="eyebrow">新账号已创建，密码只显示这一次</div>
     <div class="row"><span>账号</span><code>${esc(username)}</code></div>
     <div class="row"><span>密码</span><code>${esc(pw)}</code></div>
@@ -615,7 +665,7 @@ async function resetUser(id){
     <div class="row"><span>新密码</span><code>${esc(pw)}</code></div>
     <div class="row"><button class="btn" data-copycred="${esc(u.username)}|${esc(pw)}">复制</button>
     <button class="btn" data-hidecred>隐藏</button></div></div>`;
-  renderUsers();
+  await renderUsers();
 }
 
 /* ================= 路由 ================= */
@@ -742,7 +792,7 @@ document.addEventListener("click",async e=>{
       localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({url,key}));
       say("已保存，正在重新连接…");setTimeout(()=>location.reload(),800);return;
     }
-    if(t.id==="cfgClear"){localStorage.removeItem("lvyue_cloud_cfg");localStorage.removeItem("lvyue_sess");say("已断开");setTimeout(()=>location.reload(),600);return}
+    if(t.id==="cfgClear"){localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({forceLocal:true}));localStorage.removeItem("lvyue_sess");say("已断开");setTimeout(()=>location.reload(),600);return}
     if(t.id==="expBtn")return csv(filtered().map(({o,c})=>Object.assign({},o,{due:c.due,dueSrc:c.dueSrc,late:c.late,arrS:c.arrS,invS:c.invS,payS:c.payS,arr:c.arr,inv:c.inv,paid:c.paid,owe:c.owe,shortN:c.shortLines.length})),
       ["contract_no","order_no","supplier_name","contract_name","total_amount","currency","sign_date","due","dueSrc","late","arrS","invS","payS","arr","inv","paid","owe","shortN","purchaser","pay_condition_text"],
       {contract_no:"合同号",order_no:"订单编号",supplier_name:"供应商",contract_name:"合同名称",total_amount:"合同总额",currency:"币别",sign_date:"签订日期",due:"交期",dueSrc:"交期口径",late:"逾期天数",arrS:"到货状态",invS:"开票状态",payS:"付款状态",arr:"已到货金额",inv:"已开票金额",paid:"已付款金额",owe:"待付款",shortN:"缺料行数",purchaser:"采购员",pay_condition_text:"付款条件"},"合同台账.csv");
@@ -756,8 +806,7 @@ document.addEventListener("click",async e=>{
 document.addEventListener("change",async e=>{
   if(e.target.id==="fVoid")return renderList();
   if(e.target.id==="shortLateOnly")return renderShort();
-  if(e.target.id==="file"){const f=e.target.files[0];if(!f)return;const r=new FileReader();
-    r.onload=()=>{$("#pasteBox").value=r.result;preview(r.result)};r.readAsText(f,"utf-8");return}
+  if(e.target.id==="file"){const f=e.target.files[0];if(!f)return;return loadImportFile(f)}
   if(e.target.id==="restoreFile"){const f=e.target.files[0];if(!f)return;const r=new FileReader();
     r.onload=async()=>{try{
       const j=JSON.parse(r.result); if(!j.contracts)throw new Error("不是本系统的备份");
@@ -795,7 +844,7 @@ document.addEventListener("drop",async e=>{
   const dz=e.target.closest(".drop");if(!dz)return;e.preventDefault();dz.classList.remove("hot");
   const f=e.dataTransfer.files[0];if(!f)return;
   if(dz.id==="attDrop"){$("#attFile").files=e.dataTransfer.files;$("#attFile").dispatchEvent(new Event("change",{bubbles:true}));return}
-  const r=new FileReader();r.onload=()=>{$("#pasteBox").value=r.result;preview(r.result)};r.readAsText(f,"utf-8");
+  return loadImportFile(f);
 });
 
 /* 命令面板 */
