@@ -30,7 +30,15 @@ function download(name,content,type){
   setTimeout(()=>URL.revokeObjectURL(a.href),4000);
 }
 function csv(rowsArr,cols,names,name){
-  const cell=v=>{v=v??"";return /[",\n]/.test(v)?'"'+String(v).replace(/"/g,'""')+'"':v};
+  const cell=v=>{
+    v=v??"";
+    let s=String(v);
+    /* 以 = + - @ 开头的单元格，Excel 会当成公式执行。备注、供应商名这些
+       字段是人手输入的，可能无意（也可能恶意）以这些字符开头，加个前置
+       单引号让 Excel 老实当文本显示。 */
+    if(/^[=+\-@\t\r]/.test(s)) s="'"+s;
+    return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;
+  };
   download(name,"﻿"+cols.map(c=>names[c]||c).join(",")+"\n"+rowsArr.map(r=>cols.map(c=>cell(r[c])).join(",")).join("\n"),"text/csv;charset=utf-8");
   say("已导出 "+name);
 }
@@ -815,6 +823,15 @@ document.addEventListener("click",async e=>{
     if(t.id==="doBulkAtt")return doBulkAttach();
     if(t.id==="cancelBulkAtt"){BULK=null;$("#attBulkPreview").innerHTML="";return}
     const ru=t.closest("[data-resetu]"); if(ru)return resetUser(ru.dataset.resetu);
+    const cr=t.closest("[data-cloudrole]")||t.closest("[data-cloudtoggle]");
+    if(cr){
+      const id=cr.dataset.cloudrole||cr.dataset.cloudtoggle;
+      const role=cr.dataset.role, disabled=cr.dataset.disabled==="true";
+      if(cr.dataset.cloudtoggle&&!confirm(disabled?"确认停用该账号？停用后对方无法登录。":"确认启用该账号？"))return;
+      try{ await CloudBackend.setUserRole(id,role,disabled); say("已更新"); }
+      catch(err){ say(err.message.includes("只有管理员")?"只有管理员能改权限":err.message) }
+      return renderUsers();
+    }
     const tu=t.closest("[data-toggleu]"); if(tu){
       const u=Store.be.all("users").find(z=>z.id===tu.dataset.toggleu);
       await Store.be.setUser(u.id,{disabled:u.disabled?0:1});renderUsers();return;
@@ -844,6 +861,11 @@ document.addEventListener("click",async e=>{
       if(a==="delc"){
         if(!confirm("确认删除该合同及其物料、记录？不可恢复。"))return;
         const id=act.dataset.id;
+        /* 先删实际的附件文件，否则数据库记录没了、文件还占着云存储，
+           再也没有入口能清理到它们 */
+        for(const at of Store.be.all("attachments").filter(x=>x.contract_id===id)){
+          try{ await Store.be.delFile(at.id) }catch(err){ console.warn("附件文件删除失败",at.name,err) }
+        }
         for(const tb2 of ["materials","arrivals","invoices","payments","payplans","attachments","audit"])
           await Store.be.removeWhere(tb2,r=>r.contract_id===id);
         await Store.be.remove("contracts",id);
@@ -965,7 +987,7 @@ window.LY={
   saveContract,editContract,preview,doImport,genPlansFor,createUser,newUserModal,
   matchFileToContract,bulkPickFiles,doBulkAttach,loadImportFile,xlsxToTSV,
   get BULK(){return BULK}, set BULK(v){BULK=v},
-  resetUser,renderUsers,shortRows,filtered,reload,refreshPage
+  resetUser,renderUsers,shortRows,filtered,reload,refreshPage,csv
 };
 
 boot();

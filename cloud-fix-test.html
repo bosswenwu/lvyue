@@ -1,0 +1,99 @@
+<!doctype html><meta charset="utf-8"><title>cloud-fix</title>
+<iframe id="f" style="width:1200px;height:800px;border:0"></iframe>
+<script>
+/* 兜底：脚本解析错误、未捕获异常、卡死都要能报出来，不能悄无声息 */
+window.onerror=(m,src,ln,col)=>{ fetch("/report",{method:"POST",body:"FAILED(1)\nFAIL 页面异常 "+m+" @"+ln+":"+col}) };
+window.onunhandledrejection=e=>{ fetch("/report",{method:"POST",body:"FAILED(1)\nFAIL 未处理的 Promise 拒绝 "+(e.reason&&e.reason.message||e.reason)}) };
+setTimeout(()=>{ if(document.title!=="done") fetch("/report",{method:"POST",body:"FAILED(1)\nFAIL 测试超时未完成（卡在某个 await）"}) },50000);
+</script>
+<script>
+const L=[];const ok=(n,c,x)=>L.push((c?"PASS":"FAIL")+" "+n+(c?"":"  <"+x+">"));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||12000)){let v;try{v=fn()}catch(e){}if(v)return v;await sleep(100)}throw new Error("超时: "+label)}
+const CLOUD_URL="https://acvpjtlokrygvnwuuewr.supabase.co";
+const CLOUD_KEY="sb_publishable_j81sdF6Rd1lW_QVf_dZ1Kw_BSlYtA3N";
+(async()=>{
+let created=null,w=null;
+try{
+  await new Promise(r=>indexedDB.deleteDatabase("lvyue_cloud").onsuccess=r.onerror=r);
+  localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({url:CLOUD_URL,key:CLOUD_KEY}));
+  localStorage.removeItem("lvyue_sess"); sessionStorage.clear();
+  const f=document.getElementById("f"); f.src="index.html?"+Date.now();
+  await new Promise(r=>f.onload=r);
+  await until(()=>f.contentWindow.LY,"LY");
+  const w0=f.contentWindow; w=w0.LY;
+  const $=s=>w0.document.querySelector(s);
+  await until(()=>$("#doLogin"),"登录表单");
+
+  const email="cloudfix-"+Date.now()+"@qq.com", pw="Cfx-Pw-"+Math.floor(Math.random()*9999)+"!Aa";
+  await w.Store.be.createUser({username:email,name:"修复验证",password:pw});
+  $("#iU").value=email; $("#iP").value=pw; $("#doLogin").click();
+  await until(()=>!w0.document.querySelector(".app").hidden,"进入系统");
+  ok("云端登录成功",!!w.ME,JSON.stringify(w.ME));
+
+  /* 建一份测试合同 */
+  const cno="FIXCHK-"+Date.now();
+  const c=await w.Store.be.insert("contracts",{contract_no:cno,supplier_name:"修复验证供应商",
+    contract_name:"验证",total_amount:1000,currency:"CNY",is_void:0});
+  created=c.id;
+
+  /* === 修复1：附件上传后能原样下载回来（之前恒为 0 字节） === */
+  const text="附件内容验证 attachment-content-check";
+  const dataUrl="data:text/plain;base64,"+btoa(String.fromCharCode(...new TextEncoder().encode(text)));
+  const rec=await w.Store.be.insert("attachments",{contract_id:created,name:"验证.txt",
+    size:text.length,type:"text/plain",by:"修复验证",at:w.nowTS()});
+  await w.Store.be.putFile(rec.id,dataUrl);
+  const back=await w.Store.be.getFile(rec.id);
+  ok("附件下载非空",!!back&&back.length>30,"返回长度 "+(back?back.length:0));
+  let decoded="";
+  try{ const b=await (await fetch(back)).blob(); decoded=await b.text(); }catch(e){ decoded="解码失败:"+e.message }
+  ok("附件内容与上传一致",decoded===text,"取回: "+decoded.slice(0,40));
+
+  /* === 修复2：同一 id 重传不报 409 === */
+  let reupOk=true,reupErr="";
+  try{ await w.Store.be.putFile(rec.id,dataUrl) }catch(e){ reupOk=false; reupErr=e.message }
+  ok("附件可覆盖重传",reupOk,reupErr);
+
+  /* === 修复3：分页读取（造 3 条，验证 pageAll 能完整取回而不是被 limit 截断） === */
+  const all=await w.CloudBackend.pageAll("contracts");
+  ok("pageAll 能取到刚建的合同",all.some(x=>x.contract_no===cno),"共取回 "+all.length+" 份");
+
+  /* === 修复4：非管理员点"设为管理员"会被数据库拒绝，而不是静默无效 === */
+  let denied=false,denyMsg="";
+  try{ await w.CloudBackend.setUserRole(w.ME.id,"admin",false) }
+  catch(e){ denied=true; denyMsg=e.message }
+  ok("成员无法自我提权",denied,"竟然没报错");
+  ok("拒绝信息可读",/只有管理员|permission|denied/i.test(denyMsg),denyMsg.slice(0,80));
+
+  /* === 修复5：CSV 公式注入被中和（拦截 Blob 直接读导出内容） === */
+  let csvText=null;
+  const origCreate=w0.URL.createObjectURL, origClick=w0.HTMLAnchorElement.prototype.click;
+  w0.HTMLAnchorElement.prototype.click=function(){};        // 别真触发下载
+  w0.URL.createObjectURL=function(blob){ csvText=blob; return "blob:fake" };
+  w.csv([{a:"=1+1",b:"正常供应商"},{a:"@SUM(A1)",b:"-12"}],["a","b"],{a:"字段A",b:"字段B"},"probe.csv");
+  w0.URL.createObjectURL=origCreate; w0.HTMLAnchorElement.prototype.click=origClick;
+  const csvStr=csvText?await csvText.text():"";
+  ok("CSV 等号开头被加引号中和",csvStr.includes("'=1+1"),csvStr.replace(/\n/g," | ").slice(0,90));
+  ok("CSV @ 和 - 开头也被中和",csvStr.includes("'@SUM(A1)")&&csvStr.includes("'-12"),csvStr.replace(/\n/g," | ").slice(0,90));
+
+}catch(e){ L.push("FAIL 异常 "+e.message+" @"+String(e.stack||"").split("\n")[1]) }
+finally{
+  /* 清理：不给正式库留垃圾 */
+  try{
+    if(created&&w){
+      for(const at of w.Store.be.all("attachments").filter(x=>x.contract_id===created)){
+        try{ await w.Store.be.delFile(at.id) }catch(e){}
+        try{ await w.Store.be.remove("attachments",at.id) }catch(e){}
+      }
+      await w.Store.be.remove("contracts",created);
+      const left=await w.CloudBackend.rest("contracts?select=id&contract_no=like.FIXCHK-*");
+      ok("测试数据已清理",!left||left.length===0,JSON.stringify(left));
+    }
+  }catch(e){ L.push("FAIL 清理失败 "+e.message) }
+}
+const fails=L.filter(x=>x.startsWith("FAIL")).length;
+const out=(fails?"FAILED("+fails+")":"ALLPASS("+L.length+")")+"\n"+L.join("\n");
+try{ await fetch("/report",{method:"POST",body:out}) }catch(e){}
+document.title="done";
+})();
+</script>

@@ -217,9 +217,23 @@ const CloudBackend={
     }
     return await r.json();
   },
+  /* 分页读到底。原来固定 limit=5000，超出的行会被静默丢掉——
+     物料明细最容易超（几百份合同就能到几千行），而且丢了完全没有提示，
+     表现成"数据莫名其妙少了"，很难排查。 */
+  async pageAll(t){
+    const PAGE=1000; let out=[],from=0;
+    for(let guard=0;guard<200;guard++){
+      const rows=await this.rest(t+"?select=*&order=id.asc&offset="+from+"&limit="+PAGE);
+      if(!rows||!rows.length)break;
+      out=out.concat(rows);
+      if(rows.length<PAGE)break;
+      from+=PAGE;
+    }
+    return out;
+  },
   async loadAll(){
     const t=["contracts","materials","arrivals","invoices","payments","payplans","attachments","audit"];
-    const got=await Promise.all(t.map(x=>this.rest(x+"?select=*&limit=5000")));
+    const got=await Promise.all(t.map(x=>this.pageAll(x)));
     this.data=emptyDB(); t.forEach((k,i)=>this.data[k]=got[i]||[]);
     this.data.users=[]; return this.data;
   },
@@ -241,15 +255,36 @@ const CloudBackend={
     const gone=this.data[t].filter(fn);
     for(const g of gone) await this.remove(t,g.id);
   },
+  /* 整库替换：还原备份、清空数据都走这里。
+     顺序很重要——先删子表再删主表，否则外键会挡住；写回时反过来。 */
+  async replaceAll(next){
+    const CHILD=["materials","arrivals","invoices","payments","payplans","attachments","audit"];
+    for(const t of CHILD) await this.rest(t+"?id=not.is.null",{method:"DELETE"});
+    await this.rest("contracts?id=not.is.null",{method:"DELETE"});
+    for(const t of ["contracts",...CHILD]){
+      const rows=(next&&next[t])||[];
+      if(!rows.length)continue;
+      /* 分批写，避免一次请求体过大被网关拒掉 */
+      for(let i=0;i<rows.length;i+=500){
+        await this.rest(t,{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(rows.slice(i,i+500))});
+      }
+    }
+    await this.loadAll();
+  },
   async putFile(id,dataUrl){
     const blob=await (await fetch(dataUrl)).blob();
-    const r=await fetch(this.url+"/storage/v1/object/attachments/"+id,{method:"POST",headers:{apikey:this.key,Authorization:"Bearer "+this.token},body:blob});
+    /* x-upsert 让同一个 id 重传时覆盖而不是报 409（重试、修正上传都会碰到） */
+    const r=await fetch(this.url+"/storage/v1/object/attachments/"+id,{method:"POST",
+      headers:{apikey:this.key,Authorization:"Bearer "+this.token,"x-upsert":"true"},body:blob});
     if(!r.ok)throw new Error("附件上传失败："+(await r.text()).slice(0,140));
   },
   async getFile(id){
     const r=await fetch(this.url+"/storage/v1/object/attachments/"+id,{headers:{apikey:this.key,Authorization:"Bearer "+this.token}});
     if(!r.ok)return null;
-    return await new Promise(ok=>{const fr=new FileReader();fr.onload=()=>ok(fr.result);fr.readAsDataURL(new Blob([new Uint8Array(0)]))});
+    /* 必须读 r 自己的响应体。之前这里读的是一个新建的空 Blob，
+       导致云端模式下载下来的附件全是 0 字节。 */
+    const blob=await r.blob();
+    return await new Promise((ok,no)=>{const fr=new FileReader();fr.onload=()=>ok(fr.result);fr.onerror=()=>no(new Error("附件读取失败"));fr.readAsDataURL(blob)});
   },
   async delFile(id){ await fetch(this.url+"/storage/v1/object/attachments/"+id,{method:"DELETE",headers:{apikey:this.key,Authorization:"Bearer "+this.token}}) }
 };
