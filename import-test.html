@@ -1,0 +1,126 @@
+<!doctype html><meta charset="utf-8"><title>import</title>
+<iframe id="f" style="width:1200px;height:800px;border:0"></iframe>
+<script>
+const L=[];const ok=(n,c,x)=>L.push((c?"PASS":"FAIL")+" "+n+(c?"":"  <"+x+">"));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||8000)){let v;try{v=fn()}catch(e){}if(v)return v;await sleep(80)}throw new Error("超时: "+label)}
+(async()=>{
+try{
+  await new Promise(r=>indexedDB.deleteDatabase("lvyue_cloud").onsuccess=r.onerror=r);
+  const f=document.getElementById("f");
+  f.src="index.html?"+Date.now(); await new Promise(r=>f.onload=r);
+  const w=f.contentWindow, $=s=>w.document.querySelector(s);
+  await until(()=>$("#doInit"),"首次运行");
+  $("#iU").value="admin";$("#iN").value="何祥财";$("#doInit").click();
+  await until(()=>$("#doLoginNow"),"密码卡"); $("#doLoginNow").click();
+  await until(()=>w.LY&&w.LY.ME,"进入");
+
+  /* ===== 1. 旧系统「合同列表 → 导出 Excel」的真实表头 ===== */
+  const H1=["合同号","采购组织","订单编号","合同名称","供应商","合同总额","币别","签订日期","约定交期","承诺交期",
+    "装箱单日期","发货通知日期","要求到港日期","物流负责人","逾期天数","合同状态","到货状态","开票状态","付款状态",
+    "已到货金额","已开票金额","已支付金额","待付款金额"].join("\t");
+  const R1=[
+   ["HCMH20250510-01","摩通","CD2505260846","钢材","厦门泽源金属材料有限公司","6929284.74","CNY","2025/6/14","2026/8/14","2026/8/14",
+    "","","","张伟","0","完成","全部到货","全部开票","全部付清","6929284.74","6929284.74","6929284.74","0.00"],
+   ["HCMH20250523-01","摩通","CD2505230805","五金杂项","赣州安鑫劳保用品有限公司","32910.40","CNY","2025/5/23","2025/6/20","2026/8/6",
+    "","","","王强","0","未完成","全部到货","全部开票","未付款","32910.40","32910.40","0.00","32910.40"],
+   ["HCMH20250529-05","摩通","CD2505290959","设备","亚津智能系统（上海）有限公司","7200.00","CNY","2025/5/29","2025/6/15","2026/8/18",
+    "","","","李敏","0","未完成","全部到货","全部开票","部分付款","7200.00","7200.00","6480.00","720.00"]
+  ].map(r=>r.join("\t"));
+  $("#pasteBox").value=[H1,...R1].join("\n");
+  w.LY.preview($("#pasteBox").value);
+  await until(()=>$("#doImport"),"预览1");
+  ok("识别为合同表",$("#importPreview").textContent.includes("合同台账表"),$("#importPreview").textContent.slice(0,50));
+  await w.LY.doImport();
+  const all=w.LY.Store.be.all("contracts");
+  ok("导入份数",all.length===3,all.length);
+  const a=all.find(c=>c.contract_no==="HCMH20250510-01");
+  ok("采购组织",a.purchase_org==="摩通",a.purchase_org);
+  ok("订单编号",a.order_no==="CD2505260846",a.order_no);
+  ok("合同名称",a.contract_name==="钢材",a.contract_name);
+  ok("供应商",a.supplier_name==="厦门泽源金属材料有限公司",a.supplier_name);
+  ok("合同总额",a.total_amount===6929284.74,a.total_amount);
+  ok("币别",a.currency==="CNY",a.currency);
+  ok("签订日期",a.sign_date==="2025-06-14",a.sign_date);
+  ok("约定交期",a.contract_delivery_date==="2026-08-14",a.contract_delivery_date);
+  ok("承诺交期",a.promised_delivery_date==="2026-08-14",a.promised_delivery_date);
+  ok("物流负责人",a.logistics_owner==="张伟",a.logistics_owner);
+
+  /* 金额三件套 → 期初记录，且状态推导正确 */
+  const va=w.LY.Store.view().find(v=>v.o.contract_no==="HCMH20250510-01");
+  ok("已闭环合同_到货100%",Math.abs(va.c.arrPct-1)<1e-9,va.c.arrPct);
+  ok("已闭环合同_待付0",va.c.owe===0,va.c.owe);
+  ok("已闭环合同_状态",va.c.closed===true&&va.c.sev==="ok",va.c.sev);
+  const vb=w.LY.Store.view().find(v=>v.o.contract_no==="HCMH20250523-01");
+  ok("未付款合同_待付全额",Math.abs(vb.c.owe-32910.40)<0.01,vb.c.owe);
+  ok("未付款合同_付款状态",vb.c.payS==="未付款",vb.c.payS);
+  ok("未付款合同_进待付预警",vb.c.arrPct>=1&&vb.c.owe>0);
+  const vc=w.LY.Store.view().find(v=>v.o.contract_no==="HCMH20250529-05");
+  ok("部分付款_已付6480",vc.c.paid===6480,vc.c.paid);
+  ok("部分付款_待付720",Math.abs(vc.c.owe-720)<0.01,vc.c.owe);
+  ok("部分付款_状态",vc.c.payS==="部分付款",vc.c.payS);
+  ok("交期口径_用承诺交期",vb.c.dueSrc==="承诺交期"&&vb.c.due==="2026-08-06",vb.c.dueSrc+" "+vb.c.due);
+
+  /* ===== 2. 旧系统「报表中心 → 合同明细」的真实表头（32 列） ===== */
+  const H2=["合同名称","采购组织","项目","币别","签订日期","采购员","付款条件","合同号","供应商","订单编号",
+    "交货地址","订单抬头备注","行号","物料编码","物料名称","规格型号","单位","订购数量","含税单价","不含税金额",
+    "税率","价税合计","物料品牌","信息编码","采购计划到货日期","需求人","订单行备注","承诺交期","装箱单日期",
+    "发货通知日期","要求到港日期","物流负责人"].join("\t");
+  const R2=[
+   ["五金杂项","摩通","HCM","CNY","2025/5/30","何祥财","月结付100%","HCMH20250516-02","赣州长景五金有限公司","CD2505210662",
+    "上海港","","10","52010010267","地脚螺栓","M24*600","套","200.00","15.66","2,771.68","13%","3,132.00","",
+    "Q235，L型","2025/6/5","","LGS20250501-07","2025/6/5","","","",""],
+   ["五金杂项","摩通","HCM","CNY","2025/5/30","何祥财","月结付100%","HCMH20250516-02","赣州长景五金有限公司","CD2505210662",
+    "上海港","","20","52010010867","地脚螺栓","M27*750","套","550.00","25.20","12,265.49","13%","13,860.00","",
+    "Q235,L型","2025/6/5","","LGS20250501-08","2025/6/5","","","",""],
+   ["钢材","摩通","HCM","CNY","2025/6/4","何祥财","货到付100%","HCMH20250514-02","东莞市钢太贸易有限公司","CD2505260854",
+    "任意港口","","10","51030260076","方管","Q235B 50*50*3mm","千克","50,000.00","4.08","180,530.97","13%","204,000.00","友发",
+    "","2025/6/4","","LGS20250501-03","","","","",""]
+  ].map(r=>r.join("\t"));
+  $("#pasteBox").value=[H2,...R2].join("\n");
+  w.LY.preview($("#pasteBox").value);
+  ok("识别为明细表",$("#importPreview").textContent.includes("物料明细表"),$("#importPreview").textContent.slice(0,50));
+  await w.LY.doImport();
+  ok("合同总数变5",w.LY.Store.be.all("contracts").length===5,w.LY.Store.be.all("contracts").length);
+  ok("物料行数",w.LY.Store.be.all("materials").length===3,w.LY.Store.be.all("materials").length);
+  const m=w.LY.Store.be.all("materials").find(x=>x.material_code==="52010010267");
+  ok("物料_名称",m.material_name==="地脚螺栓",m.material_name);
+  ok("物料_规格",m.spec==="M24*600",m.spec);
+  ok("物料_单位",m.unit==="套",m.unit);
+  ok("物料_数量",m.plan_qty===200,m.plan_qty);
+  ok("物料_含税单价",m.price_tax_in===15.66,m.price_tax_in);
+  ok("物料_价税合计带千分位",m.amount_tax_in===3132,m.amount_tax_in);
+  const big=w.LY.Store.be.all("materials").find(x=>x.material_code==="51030260076");
+  ok("物料_五万千分位",big.plan_qty===50000,big.plan_qty);
+  ok("物料_二十万千分位",big.amount_tax_in===204000,big.amount_tax_in);
+  ok("物料_品牌",big.brand==="友发",big.brand);
+  const c16=w.LY.Store.be.all("contracts").find(c=>c.contract_no==="HCMH20250516-02");
+  ok("明细表_带出付款条件",c16.pay_condition_text==="月结付100%",c16.pay_condition_text);
+  ok("明细表_带出采购员",c16.purchaser==="何祥财",c16.purchaser);
+  ok("明细表_带出项目",c16.project==="HCM",c16.project);
+  ok("明细表_带出交货地址",c16.delivery_address==="上海港",c16.delivery_address);
+  ok("明细表_采购计划到货日期→约定交期",c16.contract_delivery_date==="2025-06-05",c16.contract_delivery_date);
+  ok("明细表_无总额时按行汇总",Math.abs(c16.total_amount-(3132+13860))<0.01,c16.total_amount);
+
+  /* ===== 3. 重复导入不应产生重复合同/重复物料 ===== */
+  $("#pasteBox").value=[H2,...R2].join("\n");
+  w.LY.preview($("#pasteBox").value); await w.LY.doImport();
+  ok("重复导入_合同不翻倍",w.LY.Store.be.all("contracts").length===5,w.LY.Store.be.all("contracts").length);
+  ok("重复导入_物料不翻倍",w.LY.Store.be.all("materials").length===3,w.LY.Store.be.all("materials").length);
+  $("#pasteBox").value=[H1,...R1].join("\n");
+  w.LY.preview($("#pasteBox").value); await w.LY.doImport();
+  ok("重复导入_期初金额不翻倍",Math.abs(w.LY.Store.view().find(v=>v.o.contract_no==="HCMH20250529-05").c.paid-6480)<0.01,
+     w.LY.Store.view().find(v=>v.o.contract_no==="HCMH20250529-05").c.paid);
+
+  /* ===== 4. 付款条件 → 节点 ===== */
+  await w.LY.genPlansFor(w.LY.Store.view().filter(v=>v.c.owe>0));
+  const pls=w.LY.Store.be.all("payplans").filter(p=>p.contract_id===w.LY.Store.be.all("contracts").find(c=>c.contract_no==="HCMH20250523-01").id);
+  ok("月结付100%_生成节点",pls.length===1,JSON.stringify(pls.map(p=>p.name)));
+  ok("月结付100%_金额全额",Math.abs(pls[0].amount-32910.40)<0.01,pls[0].amount);
+}catch(e){ L.push("FAIL 异常 "+e.message+" @"+String(e.stack||"").split("\n")[1]) }
+const fails=L.filter(x=>x.startsWith("FAIL")).length;
+const out=(fails?"FAILED("+fails+")":"ALLPASS("+L.length+")")+"\n"+L.join("\n");
+try{ await fetch("/report",{method:"POST",body:out}) }catch(e){}
+document.title="done";
+})();
+</script>
