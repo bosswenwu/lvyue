@@ -124,30 +124,50 @@ const CloudBackend={
     return Object.assign(h,extra||{});
   },
   async rest(path,opt){
-    const r=await fetch(this.url+"/rest/v1/"+path,Object.assign({headers:this.head(opt&&opt.headers)},opt||{}));
-    if(r.status===401){ throw new Error("登录已过期，请重新登录") }
+    /* opt 自己也可能带 headers（如 insert 用的 Prefer），必须先摘出来合并进
+       this.head()，再展开其余字段——否则外层 Object.assign 会用 opt.headers
+       整个覆盖掉算好的 apikey/Authorization，导致所有带自定义 header 的写入
+       （目前只有 insert）都会因缺 apikey 被 Supabase 拒绝。 */
+    opt=opt||{};
+    const {headers:extraHeaders,...restOpt}=opt;
+    const r=await fetch(this.url+"/rest/v1/"+path,Object.assign({headers:this.head(extraHeaders)},restOpt));
+    if(r.status===401){ throw new Error("登录已过期，请重新登录 ["+(await r.text()).slice(0,200)+"]") }
     if(!r.ok) throw new Error("接口错误 "+r.status+"："+(await r.text()).slice(0,180));
     const txt=await r.text(); return txt?JSON.parse(txt):null;
   },
-  async login(username,pw){
-    const email=username.includes("@")?username:username+"@lvyue.local";
+  /* 云端账号 = 真实邮箱。不再拼假域名——Supabase 会校验域名真实性，
+     伪造域名（如 xxx.local）会被直接拒绝而不是走认证失败，且无法做密码找回。 */
+  async login(email,pw){
+    email=String(email||"").trim();
+    if(!email.includes("@"))throw new Error("云端模式下账号是邮箱地址，请输入完整邮箱");
     const r=await fetch(this.url+"/auth/v1/token?grant_type=password",{method:"POST",headers:{apikey:this.key,"Content-Type":"application/json"},
       body:JSON.stringify({email,password:pw})});
-    if(!r.ok)throw new Error("账号或密码不对");
+    if(!r.ok){
+      const body=await r.json().catch(()=>({}));
+      if(body.error_code==="email_not_confirmed")throw new Error("该账号还未确认邮箱。请到 Supabase 后台 Authentication→Providers→Email 关闭「Confirm email」后重试");
+      throw new Error("账号或密码不对");
+    }
     const j=await r.json();
     this.token=j.access_token;
     const meta=j.user.user_metadata||{};
-    this.user={id:j.user.id,username,name:meta.name||username,role:meta.role||"user"};
+    this.user={id:j.user.id,username:email,name:meta.name||email,role:meta.role||"user"};
     localStorage.setItem("lvyue_sess",JSON.stringify({token:this.token,user:this.user}));
     return this.user;
   },
   logout(){ this.token=null; this.user=null; localStorage.removeItem("lvyue_sess") },
-  /* 用 anon key 的 signUp 建号：管理员点一下就生成账号+随机密码 */
+  /* 用 anon key 的 signUp 建号：管理员点一下就生成账号+随机密码。
+     email 必须是真实可达的邮箱域名（不必是本人常用邮箱，但域名要存在）。 */
   async createUser({username,name,role,password}){
-    const email=username.includes("@")?username:username+"@lvyue.local";
+    const email=String(username||"").trim();
+    if(!email.includes("@"))throw new Error("云端模式下账号是邮箱地址，请输入完整邮箱，例如 zhangsan@qq.com");
     const r=await fetch(this.url+"/auth/v1/signup",{method:"POST",headers:{apikey:this.key,"Content-Type":"application/json"},
-      body:JSON.stringify({email,password,data:{name,role:role||"user",username}})});
-    if(!r.ok)throw new Error("建号失败："+(await r.text()).slice(0,160));
+      body:JSON.stringify({email,password,data:{name,role:role||"user",username:email}})});
+    if(!r.ok){
+      const body=await r.json().catch(()=>({}));
+      if(body.error_code==="email_address_invalid")throw new Error("这个邮箱地址被判定为无效，换一个真实域名的邮箱试试（如 qq.com / 163.com / gmail.com）");
+      if(body.msg&&/already registered/i.test(body.msg))throw new Error("这个邮箱已经建过账号了");
+      throw new Error("建号失败："+(body.msg||JSON.stringify(body)).slice(0,160));
+    }
     return await r.json();
   },
   async loadAll(){

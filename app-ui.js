@@ -60,12 +60,21 @@ async function boot(){
 }
 function gateLogin(){
   $("#app").hidden=true; $("#gate").hidden=false;
-  const first=Store.be.kind==="local"&&Store.be.all("users").length===0;
+  const cloud=Store.be.kind==="cloud";
+  const first=!cloud&&Store.be.all("users").length===0;
   if(first){
     $("#gateBody").innerHTML=`<div class="hint">第一次使用，先建管理员账号。密码由系统随机生成，只显示这一次。</div>
       <div class="gform"><label><span>管理员账号</span><input id="iU" value="admin"></label>
       <label><span>姓名</span><input id="iN" placeholder="你的名字"></label></div>
       <button class="btn pri" id="doInit">创建并进入</button>`;
+    return;
+  }
+  if(cloud){
+    $("#gateBody").innerHTML=`<div class="gform">
+      <label><span>邮箱</span><input id="iU" type="email" autocomplete="username" placeholder="you@qq.com"></label>
+      <label><span>密码</span><input id="iP" type="password" autocomplete="current-password"></label></div>
+      <button class="btn pri" id="doLogin">登录</button><div id="loginErr"></div>
+      <div class="muted" style="margin-top:10px">云端模式下账号是邮箱。还没有账号？让管理员在「用户管理」给你建一个。</div>`;
     return;
   }
   $("#gateBody").innerHTML=`<div class="gform">
@@ -563,7 +572,7 @@ function renderData(){
 /* ================= 用户管理 ================= */
 function renderUsers(){
   if(Store.be.kind==="cloud"){
-    $("#userTb").innerHTML=`<tr><td colspan="6" class="empty">云端模式下账号由 Supabase 管理，新建账号仍可在此进行；列表需要在 Supabase 后台查看。</td></tr>`;
+    $("#userTb").innerHTML=`<tr><td colspan="6" class="empty">云端模式下账号是邮箱，由 Supabase 统一管理。点右上角「新建账号」仍可在此建号；完整账号列表和重置密码要去 Supabase 后台 Authentication → Users 操作。</td></tr>`;
     return;
   }
   const us=Store.be.all("users");
@@ -576,16 +585,18 @@ function renderUsers(){
     ||`<tr><td colspan="6" class="empty">还没有其他账号</td></tr>`;
 }
 function newUserModal(){
+  const cloud=Store.be.kind==="cloud";
   modal("新建账号",`<div class="form">
-    <label><span>账号</span><input id="nuU" placeholder="拼音或工号"></label>
+    <label><span>${cloud?"邮箱":"账号"}</span><input id="nuU" type="${cloud?"email":"text"}" placeholder="${cloud?"zhangsan@qq.com":"拼音或工号"}"></label>
     <label><span>姓名</span><input id="nuN"></label>
     <label><span>角色</span><select id="nuR"><option value="user">成员</option><option value="admin">管理员</option></select></label></div>
-    <div class="hint">密码由系统随机生成（12 位，去掉了容易看错的 0O1lI），创建后只显示一次。</div>`,
+    <div class="hint">${cloud?"云端模式下账号是邮箱地址（不需要本人能收信，只要域名真实存在，如 qq.com/163.com/gmail.com）。":""}密码由系统随机生成（12 位，去掉了容易看错的 0O1lI），创建后只显示一次。</div>`,
     `<div class="spacer"></div><button class="btn" data-close>取消</button><button class="btn pri" data-act="createUser">创建</button>`);
 }
 async function createUser(){
   const username=$("#nuU").value.trim(),name=$("#nuN").value.trim()||username,role=$("#nuR").value;
-  if(!username)return say("账号必填");
+  if(!username)return say(Store.be.kind==="cloud"?"邮箱必填":"账号必填");
+  if(Store.be.kind==="cloud"&&!username.includes("@"))return say("云端模式下账号是邮箱地址，请输入完整邮箱");
   const pw=randPw(12);
   try{ await Store.be.createUser({username,name,role,password:pw}); }
   catch(e){ return say(e.message) }

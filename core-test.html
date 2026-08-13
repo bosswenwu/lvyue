@@ -52,7 +52,8 @@ try{
   ok("calc_arr",cc.arr===700000,cc.arr);
   ok("calc_arrPct",Math.abs(cc.arrPct-0.7)<1e-9,cc.arrPct);
   ok("calc_owe",cc.owe===1000000,cc.owe);
-  ok("calc_late",cc.late===6,cc.late+" (today "+iso(TODAY)+")");
+  const expLate=Math.max(0,Math.round((new Date(new Date().toDateString())-new Date("2026-08-05T00:00:00"))/864e5));
+  ok("calc_late",cc.late===expLate,cc.late+" 期望 "+expLate+" (today "+iso(TODAY)+")");
   ok("calc_sev",cc.sev==="crit",cc.sev);
   ok("line_short",cc.shortLines.length===1&&cc.shortLines[0].short===150,JSON.stringify(cc.shortLines.map(l=>l.short)));
   ok("line_pct",Math.abs(cc.lines[0].pct-1)<1e-9&&Math.abs(cc.lines[1].pct-0.25)<1e-9,cc.lines.map(l=>l.pct).join(","));

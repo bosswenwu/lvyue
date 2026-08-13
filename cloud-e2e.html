@@ -1,0 +1,97 @@
+<!doctype html><meta charset="utf-8"><title>cloud-e2e</title>
+<iframe id="f" style="width:1400px;height:900px;border:0"></iframe>
+<script>
+const L=[];const ok=(n,c,x)=>L.push((c?"PASS":"FAIL")+" "+n+(c?"":"  <"+x+">"));
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));
+async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||10000)){let v;try{v=fn()}catch(e){}if(v)return v;await sleep(100)}throw new Error("超时: "+label)}
+const CLOUD_URL="https://acvpjtlokrygvnwuuewr.supabase.co";
+const CLOUD_KEY="sb_publishable_j81sdF6Rd1lW_QVf_dZ1Kw_BSlYtA3N";
+(async()=>{
+ try{
+  await new Promise(r=>indexedDB.deleteDatabase("lvyue_cloud").onsuccess=r.onerror=r);
+  localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({url:CLOUD_URL,key:CLOUD_KEY}));
+  localStorage.removeItem("lvyue_sess"); sessionStorage.clear();
+
+  const f=document.getElementById("f"); f.src="index.html?"+Date.now();
+  await new Promise(r=>f.onload=r);
+  await until(()=>f.contentWindow.LY,"LY 入口");
+  let w0=f.contentWindow, w=w0.LY, $=s=>w0.document.querySelector(s);
+
+  /* 1. 云端模式下应直接显示邮箱登录表单，而不是本机的建号表单 */
+  await until(()=>$("#doLogin"),"登录表单");
+  ok("云端_不是首次建号表单",!$("#doInit"));
+  ok("云端_账号字段是邮箱",$("#iU").type==="email",$("#iU").type);
+
+  /* 2. 模拟管理员在后台/用户管理里建号（走真实 Supabase） */
+  const email="cloud-e2e-"+Date.now()+"@qq.com", pw="Ce2e-Pw-"+Math.floor(Math.random()*9999)+"!Aa";
+  const created=await w.Store.be.createUser({username:email,name:"云端测试员",role:"admin",password:pw});
+  ok("云端建号成功",!!(created&&created.access_token||created&&created.user),JSON.stringify(created).slice(0,120));
+
+  /* 3. 用刚建的账号走 UI 真实登录（不是直接调 API，是点按钮） */
+  $("#iU").value=email; $("#iP").value=pw;
+  $("#doLogin").click();
+  /* ME 在 loadAll() 完成前就赋值了，真正的界面切换要等 enter() 跑完，
+     所以等「主界面不再隐藏」这个更可靠的信号，而不是 ME 一出现就检查 */
+  await until(()=>!w0.document.querySelector(".app").hidden,"界面切换完成",10000);
+  ok("云端登录_ME正确",w0.LY.ME&&w0.LY.ME.username===email,JSON.stringify(w0.LY.ME));
+  ok("云端登录_界面已切换",w0.getComputedStyle(w0.document.querySelector("#gate")).display==="none",
+     w0.getComputedStyle(w0.document.querySelector("#gate")).display);
+  ok("云端登录_模式标签",$("#modeTag").textContent==="云端",$("#modeTag").textContent);
+
+  /* 4. 新建一份合同，落到真实数据库 */
+  const cno="CLOUD-E2E-"+Date.now();
+  const contract=await w.Store.be.insert("contracts",{contract_no:cno,supplier_name:"云端联调测试供应商",
+    contract_name:"云端联调",total_amount:88888.88,currency:"CNY",is_void:0});
+  ok("云端写入合同",!!contract&&contract.contract_no===cno,JSON.stringify(contract).slice(0,100));
+
+  /* 5. 重新整页加载（模拟"换一台设备打开"），验证数据真的在云端而不是本机缓存。
+     此时本地已缓存有效登录态（lvyue_sess），预期是自动登录、不再出现登录表单；
+     若缓存失效则退回登录表单——两条路径都覆盖，不对具体走哪条硬编码假设。 */
+  f.src="index.html?verify="+Date.now(); await new Promise(r=>f.onload=r);
+  await until(()=>f.contentWindow.LY,"重载后 LY");
+  w0=f.contentWindow; w=w0.LY; $=s=>w0.document.querySelector(s);
+  const path=await Promise.race([
+    until(()=>!w0.document.querySelector(".app").hidden,"自动登录",10000).then(()=>"auto"),
+    until(()=>$("#doLogin"),"登录表单",10000).then(()=>"form")
+  ]);
+  ok("重载后_走的是缓存自动登录",path==="auto",path);
+  if(path==="form"){ $("#iU").value=email; $("#iP").value=pw; $("#doLogin").click();
+    await until(()=>!w0.document.querySelector(".app").hidden,"表单登录后界面切换",10000); }
+  await until(()=>w0.LY.Store.be.all("contracts").some(c=>c.contract_no===cno),"云端合同已可见",8000);
+  const found=w0.LY.Store.be.all("contracts").find(c=>c.contract_no===cno);
+  ok("跨会话读到云端数据",!!found,"重载新会话后找不到刚才写入的合同");
+  ok("跨会话_中文供应商名正确",found&&found.supplier_name==="云端联调测试供应商",found&&found.supplier_name);
+
+  /* 6. 通过界面登记一笔到货，验证写操作走 UI 完整链路 */
+  w.curId=found.id; w.tabI=0;
+  await w.regModal("到货");
+  await until(()=>$("#eAmt"),"登记到货弹窗");
+  $("#eAmt").value="30000"; $("#eNo").value="CLOUD-GR-001";
+  await w.saveEvent("到货",null);
+  await sleep(500);
+  const view=w.Store.view().find(v=>v.o.id===found.id);
+  ok("云端登记到货_已入账",Math.abs(view.c.arr-30000)<0.01,view.c.arr);
+
+  /* 7. 未登录不能读到任何数据。PostgREST 对 RLS 过滤的 SELECT 惯例是
+     200+空数组，不是 401——真正该断言的是"看不到数据"，不是具体状态码。 */
+  const rawTest=await fetch(CLOUD_URL+"/rest/v1/contracts?select=id&contract_no=eq."+encodeURIComponent(cno),{headers:{apikey:CLOUD_KEY}});
+  const rawRows=await rawTest.json();
+  ok("匿名读不到任何数据",Array.isArray(rawRows)&&rawRows.length===0,"status="+rawTest.status+" rows="+JSON.stringify(rawRows));
+
+  /* 8. 清理测试数据（不留垃圾在正式库里）*/
+  await w.Store.be.remove("contracts",found.id);
+  const afterDel=await fetch(CLOUD_URL+"/rest/v1/contracts?id=eq."+found.id+"&select=id",{headers:{apikey:CLOUD_KEY,Authorization:"Bearer "+w.Store.be.token}});
+  const afterDelJson=await afterDel.json();
+  ok("清理_测试合同已删除",afterDelJson.length===0,JSON.stringify(afterDelJson));
+
+ }catch(e){
+   let diag="";
+   try{ const cb=f.contentWindow.LY.CloudBackend; diag=" | key="+(cb.key?cb.key.slice(0,14)+"…":"undefined")+" token="+(cb.token?"present":"missing")+" url="+cb.url; }catch(e2){ diag=" | 诊断信息读取失败:"+e2.message }
+   L.push("FAIL 异常 "+e.message+" @"+String(e.stack||"").split("\n").slice(0,2).join(" | ")+diag);
+ }
+ const fails=L.filter(x=>x.startsWith("FAIL")).length;
+ const out=(fails?"FAILED("+fails+")":"ALLPASS("+L.length+")")+"\n"+L.join("\n");
+ try{ await fetch("/report",{method:"POST",body:out}) }catch(e){}
+ document.title="done";
+})();
+</script>
