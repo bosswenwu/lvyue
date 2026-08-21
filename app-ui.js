@@ -82,7 +82,8 @@ function gateLogin(){
       <label><span>邮箱</span><input id="iU" type="email" autocomplete="username" placeholder="you@qq.com"></label>
       <label><span>密码</span><input id="iP" type="password" autocomplete="current-password"></label></div>
       <button class="btn pri" id="doLogin">登录</button><div id="loginErr"></div>
-      <div class="muted" style="margin-top:10px">云端模式下账号是邮箱。还没有账号？让管理员在「用户管理」给你建一个。</div>`;
+      <div class="muted" style="margin-top:10px">云端模式下账号是邮箱。还没有账号？让管理员在「用户管理」给你建一个。<br>
+      当前连的云端项目：<code>${esc(cloudHost())}</code>${CloudBackend.cfg()&&CloudBackend.cfg().manual?"（本机手工填的地址）":""}</div>`;
     return;
   }
   $("#gateBody").innerHTML=`<div class="gform">
@@ -100,13 +101,25 @@ async function doInit(){
     <div class="row"><span>密码</span><code>${esc(pw)}</code></div></div>
     <button class="btn pri" id="doLoginNow" data-u="${esc(u)}" data-p="${esc(pw)}">我记好了，进入系统</button>`;
 }
+/* 登录页上显示到底连的是哪个项目——密钥/地址配错时，光看"登录失败"看不出来 */
+function cloudHost(){
+  try{ return new URL(CloudBackend.url||(CloudBackend.cfg()||{}).url||"").host||"未配置" }catch(e){ return "未配置" }
+}
 async function login(u,p){
+  let signedIn=false;
   try{
-    ME=await Store.be.login(u,p);
+    ME=await Store.be.login(u,p); signedIn=true;
     if(Store.be.kind==="cloud")await CloudBackend.loadAll();
     else sessionStorage.setItem("ly_me",JSON.stringify(ME));
     enter();
-  }catch(e){ const el=$("#loginErr"); if(el)el.innerHTML=`<div class="critbox" style="margin-top:10px">${esc(e.message)}</div>`; else say(e.message) }
+  }catch(e){
+    /* 账号密码其实过了、卡在后面拉数据（RLS 没配、表没建）也会走到这里。
+       不说清楚的话看着就是"登录失败"，会一直去折腾密码。 */
+    const m=signedIn?("账号密码是对的，登录已经通过了，是随后读取数据时出的错："+e.message+
+      "｜如果写的是权限/表不存在，多半是 Supabase 里还没跑过 schema.sql 和 schema_v2_roles.sql"):e.message;
+    if(signedIn&&Store.be.kind==="cloud")CloudBackend.logout();
+    const el=$("#loginErr"); if(el)el.innerHTML=`<div class="critbox" style="margin-top:10px">${esc(m)}</div>`; else say(m);
+  }
 }
 function enter(){
   $("#gate").hidden=true; $("#app").hidden=false;
@@ -899,7 +912,10 @@ document.addEventListener("click",async e=>{
     if(t.id==="cfgSave"){
       const url=$("#cfgUrl").value.trim(),key=$("#cfgKey").value.trim();
       if(!url||!key)return say("地址和密钥都要填");
-      localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({url,key}));
+      /* manual 标记：告诉 cfg() 这是人手工填的覆盖值，要优先于代码里的默认配置。
+         没有这个标记的记录会被当成"默认配置的旧副本"忽略掉。 */
+      localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({url,key,manual:true}));
+      localStorage.removeItem("lvyue_sess");
       say("已保存，正在重新连接…");setTimeout(()=>location.reload(),800);return;
     }
     if(t.id==="cfgClear"){localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({forceLocal:true}));localStorage.removeItem("lvyue_sess");say("已断开");setTimeout(()=>location.reload(),600);return}

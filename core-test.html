@@ -81,6 +81,33 @@ try{
   ok("persist",be2.all("contracts").length===1&&be2.all("contracts")[0].logistics_owner==="张伟",be2.all("contracts").length);
   await be.remove("contracts","c1");
   ok("crud_remove",be.all("contracts").length===0);
+  /* 9. 云端配置来源：默认配置不能被浏览器里的旧副本钉死 */
+  const CFGK="lvyue_cloud_cfg", saved=localStorage.getItem(CFGK);
+  localStorage.removeItem(CFGK);
+  ok("cfg_default",(CloudBackend.cfg()||{}).url===DEFAULT_CLOUD_CFG.url,JSON.stringify(CloudBackend.cfg()));
+  /* 没有 manual 标记 = 老版本 init() 自己抄进来的默认配置副本，必须忽略，
+     否则默认地址/密钥更新后老浏览器永远拿旧的，表现成"突然登不上了" */
+  localStorage.setItem(CFGK,JSON.stringify({url:"https://stale.supabase.co",key:"old_anon_key"}));
+  ok("cfg_ignores_stale_copy",(CloudBackend.cfg()||{}).url===DEFAULT_CLOUD_CFG.url,JSON.stringify(CloudBackend.cfg()));
+  /* 手工在「接入云端」填的才算覆盖 */
+  localStorage.setItem(CFGK,JSON.stringify({url:"https://mine.supabase.co",key:"k",manual:true}));
+  ok("cfg_manual_wins",(CloudBackend.cfg()||{}).url==="https://mine.supabase.co",JSON.stringify(CloudBackend.cfg()));
+  localStorage.setItem(CFGK,JSON.stringify({forceLocal:true}));
+  ok("cfg_force_local",CloudBackend.cfg()===null,JSON.stringify(CloudBackend.cfg()));
+  /* init() 不再把配置写回 localStorage */
+  localStorage.removeItem(CFGK);
+  await CloudBackend.init();
+  ok("init_no_writeback",localStorage.getItem(CFGK)===null,localStorage.getItem(CFGK));
+  /* 换了项目/密钥后，旧会话必须作废，否则后面每个请求都 401 */
+  localStorage.setItem("lvyue_sess",JSON.stringify({token:"t",user:{id:"u"},stamp:"https://other.supabase.co|k"}));
+  await CloudBackend.init({url:DEFAULT_CLOUD_CFG.url,key:DEFAULT_CLOUD_CFG.key});
+  ok("stale_session_dropped",CloudBackend.token===null&&localStorage.getItem("lvyue_sess")===null,String(CloudBackend.token));
+  localStorage.setItem("lvyue_sess",JSON.stringify({token:"t2",user:{id:"u"},stamp:DEFAULT_CLOUD_CFG.url+"|"+DEFAULT_CLOUD_CFG.key}));
+  await CloudBackend.init({url:DEFAULT_CLOUD_CFG.url,key:DEFAULT_CLOUD_CFG.key});
+  ok("matching_session_kept",CloudBackend.token==="t2",String(CloudBackend.token));
+  CloudBackend.logout();
+  if(saved===null)localStorage.removeItem(CFGK);else localStorage.setItem(CFGK,saved);
+
 }catch(e){ L.push("FAIL exception "+e.message+" @"+String(e.stack||"").split("\n")[1]) }
 const fails=L.filter(x=>x.startsWith("FAIL")).length;
 const out=(fails?"FAILED("+fails+")":"ALLPASS")+"\n"+L.join("\n");
