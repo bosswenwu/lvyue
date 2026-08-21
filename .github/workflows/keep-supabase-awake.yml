@@ -1,0 +1,53 @@
+# 免费版 Supabase 项目连续 7 天没有任何 API 请求就会自动暂停，
+# 一暂停所有人都登不上（连接直接被关掉，浏览器报 ERR_CONNECTION_CLOSED）。
+# 2026-08-21 就是这么停的：8/13 最后一次访问，8/20 到期自动暂停。
+#
+# 这个定时任务每两天打一次真实的 API 请求，把闲置计时器清零。
+# 请求打到 PostgREST，会真的落到 Postgres 上，比只 ping 网关可靠。
+#
+# 注意两件事：
+# 1. Supabase 官方没有承诺"有请求就一定不暂停"，这是依据其闲置判定
+#    的常规做法，不是契约。真要保证不停机，得升付费版。
+# 2. GitHub 对连续 60 天无提交的仓库会自动停用定时工作流，
+#    并发邮件通知。收到那封信点一下重新启用即可。
+name: keep-supabase-awake
+
+on:
+  schedule:
+    - cron: "17 3 */2 * *"   # 每两天 UTC 03:17（错开整点，避免和全网定时任务挤在一起）
+  workflow_dispatch:          # 也可以在 Actions 页面手动点一次
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 请求一次云端，重置闲置计时
+        env:
+          # 这是 publishable key（旧称 anon key），本来就随前端代码公开发布，
+          # 见 app-core.js 的 DEFAULT_CLOUD_CFG。不是 secret key，不能用来越权。
+          SUPABASE_URL: https://acvpjtlokrygvnwuuewr.supabase.co
+          SUPABASE_KEY: sb_publishable_j81sdF6Rd1lW_QVf_dZ1Kw_BSlYtA3N
+        run: |
+          set -uo pipefail
+          # 走 PostgREST 读一行合同。匿名身份被 RLS 挡住读不到数据（返回空数组），
+          # 但请求本身照样落到数据库上，这正是我们要的"有活动"。
+          code=$(curl -sS -o /tmp/body.txt -w '%{http_code}' --max-time 30 --retry 3 --retry-delay 10 \
+            -H "apikey: $SUPABASE_KEY" \
+            "$SUPABASE_URL/rest/v1/contracts?select=id&limit=1") || true
+          echo "HTTP $code"
+          head -c 300 /tmp/body.txt; echo
+          case "$code" in
+            2*|401|403)
+              # 2xx 正常；401/403 说明服务是活的、只是把匿名身份挡住了——同样算数
+              echo "云端在线，闲置计时已重置"
+              ;;
+            000)
+              echo "::error::连不上 $SUPABASE_URL —— 项目可能已被暂停，到 Supabase 后台点 Restore"
+              exit 1
+              ;;
+            *)
+              echo "::error::云端返回 HTTP $code，需要人工看一眼"
+              exit 1
+              ;;
+          esac
