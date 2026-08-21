@@ -1003,7 +1003,7 @@ window.LY={
   saveContract,editContract,preview,doImport,genPlansFor,createUser,newUserModal,
   matchFileToContract,bulkPickFiles,doBulkAttach,loadImportFile,xlsxToTSV,
   get BULK(){return BULK}, set BULK(v){BULK=v},
-  resetUser,renderUsers,shortRows,filtered,reload,refreshPage,csv
+  resetUser,renderUsers,shortRows,renderShort,filtered,reload,refreshPage,csv
 };
 
 boot();
