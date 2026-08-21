@@ -125,18 +125,30 @@ const CloudBackend={
     try{
       const s=JSON.parse(localStorage.getItem("lvyue_cloud_cfg")||"null");
       if(s&&s.forceLocal) return null;
-      if(s&&s.url&&s.key) return s;
+      /* 只认「人手工填过的」覆盖值（manual 标记，数据管理页保存时写入）。
+         以前 init() 会把默认配置也原样写回 localStorage，于是默认地址/密钥
+         一旦更新（最典型的就是 Supabase 把旧 anon key 换成 publishable key、
+         旧 key 随即失效），老浏览器里存的还是当初那份旧的，永远拿不到新配置——
+         表现就是「用了好好的，某天突然登不上了」，而换台新设备/新浏览器反而正常。
+         没有 manual 标记的旧记录一律忽略，直接用代码里的默认配置。 */
+      if(s&&s.manual&&s.url&&s.key) return {url:s.url,key:s.key,manual:true};
     }catch(e){}
-    return DEFAULT_CLOUD_CFG.url?DEFAULT_CLOUD_CFG:null;
+    return DEFAULT_CLOUD_CFG.url?{url:DEFAULT_CLOUD_CFG.url,key:DEFAULT_CLOUD_CFG.key}:null;
   },
   async init(cfg){
     cfg=cfg||this.cfg(); if(!cfg||!cfg.url||!cfg.key)throw new Error("未配置云端");
     this.url=cfg.url.replace(/\/+$/,""); this.key=cfg.key;
-    localStorage.setItem("lvyue_cloud_cfg",JSON.stringify({url:this.url,key:this.key}));
+    /* 这里不再把配置写回 localStorage：写回去的那份会被 cfg() 当成"用户的覆盖值"，
+       把代码里的默认配置永久钉死在这台浏览器上（见 cfg() 的注释）。
+       只有数据管理页「接入云端」手工保存时才写，且带 manual 标记。 */
     const sess=(()=>{try{return JSON.parse(localStorage.getItem("lvyue_sess")||"null")}catch(e){return null}})();
-    if(sess&&sess.token){ this.token=sess.token; this.user=sess.user; }
+    /* 会话是绑定「哪个项目 + 哪把密钥」的。配置换过之后还留着旧 token，
+       只会在后面每一个请求上拿 401，不如在这里就丢掉，干脆退回登录页重登一次。 */
+    if(sess&&sess.token&&sess.stamp===this.stamp()){ this.token=sess.token; this.user=sess.user; }
+    else if(sess) localStorage.removeItem("lvyue_sess");
     return this;
   },
+  stamp(){ return this.url+"|"+this.key },
   head(extra){
     const h={apikey:this.key,"Content-Type":"application/json"};
     if(this.token)h.Authorization="Bearer "+this.token;
@@ -159,12 +171,34 @@ const CloudBackend={
   async login(email,pw){
     email=String(email||"").trim();
     if(!email.includes("@"))throw new Error("云端模式下账号是邮箱地址，请输入完整邮箱");
-    const r=await fetch(this.url+"/auth/v1/token?grant_type=password",{method:"POST",headers:{apikey:this.key,"Content-Type":"application/json"},
-      body:JSON.stringify({email,password:pw})});
+    let r;
+    try{
+      r=await fetch(this.url+"/auth/v1/token?grant_type=password",{method:"POST",headers:{apikey:this.key,"Content-Type":"application/json"},
+        body:JSON.stringify({email,password:pw})});
+    }catch(e){
+      /* fetch 直接抛 = 请求根本没发出去或没拿到响应：断网、DNS 解析不了、
+         项目被暂停/删除后域名不再解析、被网络策略挡掉。跟密码没有任何关系。 */
+      throw new Error("连不上云端服务器（"+this.url+"）。先检查网络；如果网络正常，多半是这个 Supabase 项目被暂停或删除了——免费项目长时间没人访问会自动暂停，到 Supabase 后台点 Restore 恢复即可。");
+    }
     if(!r.ok){
+      /* 以前这里不管什么状态码一律报「账号或密码不对」，于是密钥失效、项目暂停、
+         被限流这些跟密码毫无关系的故障，全都表现成"密码错了"，只会让人一遍遍
+         去试密码、去重置密码，永远修不到点子上。按状态码分开说清楚。 */
       const body=await r.json().catch(()=>({}));
-      if(body.error_code==="email_not_confirmed")throw new Error("该账号还未确认邮箱。请到 Supabase 后台 Authentication→Providers→Email 关闭「Confirm email」后重试");
-      throw new Error("账号或密码不对");
+      const code=String(body.error_code||body.error||"");
+      const msg=String(body.msg||body.error_description||body.message||"");
+      const raw=(msg||code)?("｜服务器原文："+(msg||code).slice(0,160)):"";
+      if(code==="email_not_confirmed")throw new Error("该账号还未确认邮箱。请到 Supabase 后台 Authentication→Providers→Email 关闭「Confirm email」后重试");
+      if(code==="user_banned")throw new Error("这个账号在 Supabase 后台被封禁了（banned），到 Authentication→Users 里解除即可"+raw);
+      if(r.status===401||/api[ _-]?key/i.test(msg+code))
+        throw new Error("云端密钥（API key）被拒绝了，这不是密码的问题。多半是 Supabase 里轮换过密钥、而这台浏览器还存着旧的那把。到「数据管理 → 接入云端」重新填一遍最新的 Project URL 和 Publishable key"+raw);
+      if(r.status===429)
+        throw new Error("登录太频繁，被 Supabase 限流了。等一两分钟再试，别连续点"+raw);
+      if(r.status>=500||r.status===540)
+        throw new Error("云端服务器返回 "+r.status+"，账号密码没走到校验那一步。多半是 Supabase 项目被暂停了，到后台点 Restore 恢复后再登"+raw);
+      if(r.status===400&&/invalid[ _]?(login[ _]?)?credentials|invalid_grant/i.test(code+" "+msg))
+        throw new Error("账号或密码不对。云端模式下账号是完整邮箱；密码忘了要到 Supabase 后台 Authentication→Users 里重置");
+      throw new Error("登录失败（HTTP "+r.status+"）"+(raw||"｜服务器没有返回具体原因"));
     }
     const j=await r.json();
     this.token=j.access_token;
@@ -193,7 +227,7 @@ const CloudBackend={
       if(/已被管理员停用/.test(e.message)) throw e; // 停用是真错误，必须拦下
       console.warn("profiles 表还不可用（可能没跑 schema_v2_roles.sql），暂时按「成员」处理：",e.message);
     }
-    localStorage.setItem("lvyue_sess",JSON.stringify({token:this.token,user:this.user}));
+    localStorage.setItem("lvyue_sess",JSON.stringify({token:this.token,user:this.user,stamp:this.stamp()}));
     return this.user;
   },
   async setUserRole(targetId,newRole,newDisabled){

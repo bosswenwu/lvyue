@@ -27,11 +27,17 @@ async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||8
   ok("admin_sees_users",!$("#navUsers").hidden);
 
   /* 2. 导入合同台账 */
+  /* 交期必须相对今天算，不能写死。写死的未来日期会随日历过期：
+     HT-003 原本写的 2026/8/13 是用来当"未到期合同"验证催货清单的
+     「只看已过交期」过滤的，日子一过就变成逾期，那条断言就无缘无故变红，
+     看着像产品坏了，其实是测试自己烂了。逾期侧可以写死（过去永远是过去）。 */
+  const rel=n=>{const x=new Date();x.setHours(0,0,0,0);x.setDate(x.getDate()+n);return x.getFullYear()+"/"+(x.getMonth()+1)+"/"+x.getDate()};
+  const FUTURE=rel(30);   // 未到期
   const head=["合同号","订单编号","供应商","合同名称","合同总额","签订日期","约定交期","承诺交期","付款条件","已到货金额","已开票金额","已支付金额"].join("\t");
   const rows=[
    ["HT-001","CD001","甲金属","钢材","1,000,000.00","2025/6/1","2026/8/5","2026/8/5","预付30%，货到付60%，质保金10%","0","0","0"],
-   ["HT-002","CD002","乙设备","设备","200000","2025/7/1","2026/9/20","","月结30天","200000","200000","0"],
-   ["HT-003","CD003","丙五金","五金","50000","2025/7/2","2026/8/13","2026/8/13","货到付100%","0","0","0"]
+   ["HT-002","CD002","乙设备","设备","200000","2025/7/1",rel(60),"","月结30天","200000","200000","0"],
+   ["HT-003","CD003","丙五金","五金","50000","2025/7/2",FUTURE,FUTURE,"货到付100%","0","0","0"]
   ].map(r=>r.join("\t"));
   $("#pasteBox").value=[head,...rows].join("\n");
   w.preview($("#pasteBox").value);
@@ -82,8 +88,15 @@ async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||8
 
   /* 5. 催货清单 */
   w.go("short");
+  /* 默认勾选「只看已过交期」：只有逾期的 HT-001 缺料行进来，
+     未到期的 HT-003 那行被过滤掉 */
   ok("short_page",$$("#shortTb tr").length===1,$$("#shortTb tr").length);
   ok("short_amt",$("#shortCnt").textContent.includes("24.0万"),$("#shortCnt").textContent);
+  /* 取消勾选就该看到全部缺料行，包含未到期的 HT-003（500 个法兰 · 5 万） */
+  $("#shortLateOnly").checked=false; w.renderShort();
+  ok("short_all",$$("#shortTb tr").length===2,$$("#shortTb tr").length);
+  ok("short_all_amt",$("#shortCnt").textContent.includes("29.0万"),$("#shortCnt").textContent);
+  $("#shortLateOnly").checked=true; w.renderShort();
 
   /* 6. 付款计划 */
   w.openD(c1.id); w.tabI=2; w.drawTab();
