@@ -233,8 +233,8 @@ function filtered(){
   const col=COLS.find(c=>c.k===sortK);
   return r.sort((x,y)=>{const A=col&&col.v?col.v(x):(x.o[sortK]??""),B=col&&col.v?col.v(y):(y.o[sortK]??"");return (A>B?1:A<B?-1:0)*sortD});
 }
-function renderList(){
-  reload();
+function renderList(skipReload){
+  if(!skipReload)reload();   // 筛选/搜索不改数据，跳过全量聚合，只重排重绘
   const sups=[...new Set(VIEWDATA.map(x=>x.o.supplier_name).filter(Boolean))].sort();
   const sel=$("#fSup"),keep=sel.value;
   sel.innerHTML=`<option value="">全部</option>`+sups.map(s=>`<option>${esc(s)}</option>`).join("");sel.value=keep;
@@ -697,25 +697,30 @@ async function doBulkAttach(){
   const todo=BULK.filter(b=>b.contractId&&!b.tooBig);
   if(!todo.length)return say("没有可上传的文件");
   const btn=$("#doBulkAtt"); if(btn){btn.disabled=true;btn.textContent="上传中…"}
-  let done=0,failed=[];
+  let uploaded=0,processed=0,failed=[];
   const byContract={};
-  for(const b of todo){
+  const uploadOne=async b=>{
     try{
       const dataUrl=await new Promise((ok,no)=>{const fr=new FileReader();fr.onload=()=>ok(fr.result);fr.onerror=()=>no(new Error("读取失败"));fr.readAsDataURL(b.file)});
       const rec=await Store.be.insert("attachments",{contract_id:b.contractId,name:b.file.name,
         size:b.file.size,type:b.file.type,by:(ME&&ME.name)||"",at:nowTS()});
       await Store.be.putFile(rec.id,dataUrl);
       (byContract[b.contractId]=byContract[b.contractId]||[]).push(b.file.name);
-      done++;
-      if(btn)btn.textContent=`上传中… ${done}/${todo.length}`;
+      uploaded++;
     }catch(e){ failed.push(b.file.name+"（"+e.message+"）") }
-  }
+    finally{ processed++; if(btn)btn.textContent=`上传中… ${processed}/${todo.length}`; }
+  };
+  /* 限并发上传：一次最多 4 个并行，比逐个串行快好几倍，又不会几十个请求一次性
+     打爆浏览器连接数/网关。用一个固定大小的 worker 池轮流取任务。 */
+  const CONC=4; let idx=0;
+  const worker=async()=>{ while(idx<todo.length){ await uploadOne(todo[idx++]); } };
+  await Promise.all(Array.from({length:Math.min(CONC,todo.length)},worker));
   for(const [cid,names] of Object.entries(byContract)) await logIt(cid,"批量上传附件 "+names.join("、"));
   BULK=null; reload();
   $("#attBulkPreview").innerHTML=`<div class="${failed.length?"warnbox":"hint"}">
-    已上传 <b>${done}</b> 个附件，归到 ${Object.keys(byContract).length} 份合同下。
+    已上传 <b>${uploaded}</b> 个附件，归到 ${Object.keys(byContract).length} 份合同下。
     ${failed.length?`<br>失败 ${failed.length} 个：${esc(failed.join("；"))}`:""}</div>`;
-  renderData(); say(`已上传 ${done} 个附件`);
+  renderData(); say(`已上传 ${uploaded} 个附件`);
 }
 function renderData(){
   const n=Store.be.all("contracts").length,m=Store.be.all("materials").length;
@@ -947,7 +952,13 @@ document.addEventListener("click",async e=>{
     if(!t.closest("#cmdk"))$("#cmdk").classList.remove("on");
   }catch(err){ say("出错了："+err.message); console.error(err) }
 });
-["fq","fArr","fPay","fSup"].forEach(id=>document.addEventListener("input",e=>{if(e.target.id===id)renderList()}));
+/* 搜索框逐字防抖（180ms），几千份合同时避免每敲一下就全量重排重绘；
+   下拉筛选是离散操作，即时响应。两者都传 true 跳过 reload（数据没变）。 */
+let _fqTimer=null;
+document.addEventListener("input",e=>{
+  if(e.target.id==="fq"){ clearTimeout(_fqTimer); _fqTimer=setTimeout(()=>renderList(true),180); return; }
+  if(e.target.id==="fArr"||e.target.id==="fPay"||e.target.id==="fSup") renderList(true);
+});
 document.addEventListener("change",async e=>{
   if(e.target.id==="fVoid")return renderList();
   if(e.target.id==="shortLateOnly")return renderShort();
