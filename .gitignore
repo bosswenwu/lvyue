@@ -2,3 +2,11 @@ report.txt
 serve.ps1
 .DS_Store
 Thumbs.db
+
+# 真实业务数据，禁止进入公开仓库
+刚果TCC物资进度跟踪表（2026年）.xlsx
+
+# 开发测试页，不发布
+debug-parse.html
+drop-test.html
+real-file-test.html

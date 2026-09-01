@@ -526,40 +526,59 @@ async function saveContract(id){
 }
 
 /* ================= 导入 ================= */
-const XLSX_EXT=/\.xlsx?$/i;
 /* 把 .xlsx/.xls 转成跟"从 Excel 里全选复制"完全一样的 TSV 文本，
    这样后面复用一套 parseTable()，不用再单独维护一条二进制解析逻辑。
    工作簿可能有好几个 sheet（比如我们自己发的导入模板），
    挑表头里含"合同号"、且能对上系统字段最多的那个 sheet。 */
 function xlsxToTSV(arrayBuffer){
-  if(typeof XLSX==="undefined") throw new Error("Excel 解析库没加载成功，换成「全选复制→粘贴」的方式导入，或检查网络");
-  const wb=XLSX.read(arrayBuffer,{type:"array",cellDates:true});
+  if(typeof XLSX==="undefined") throw new Error("Excel 解析库没加载成功，请刷新页面重试；仍然不行就用「全选复制→粘贴」的方式导入");
+  /* 统一转成本环境的 Uint8Array 再交给 XLSX：直接传外部传进来的 ArrayBuffer
+     时，解析库内部的类型判断可能认不出（跨 iframe/worker 时尤其如此），
+     表现为"解析不出任何表"，很难排查。 */
+  const bytes=arrayBuffer instanceof Uint8Array?arrayBuffer:new Uint8Array(arrayBuffer);
+  const wb=XLSX.read(bytes,{type:"array",cellDates:true});
   let best=null,bestScore=-1,candidates=0;
   for(const name of wb.SheetNames){
     const tsv=XLSX.utils.sheet_to_csv(wb.Sheets[name],{FS:"\t",blankrows:false});
-    const head=(tsv.split("\n")[0]||"").split("\t").map(h=>h.trim().replace(/^﻿/,"").replace(/[▲▼①②③\s]/g,""));
-    if(!head.includes("合同号"))continue;
+    /* 用 parseTable 本身来判断这个 sheet 行不行——它会在前 15 行里自动找表头，
+       不能只看第一行（很多表第一行是大标题，真表头在第 3、4 行）。 */
+    const p=parseTable(tsv);
+    if(!p||p.error||!p.data.length)continue;
     candidates++;
-    const score=head.filter(h=>MAP[h]).length;
-    if(score>bestScore){bestScore=score;best={name,tsv}}
+    const score=p.keys.filter(Boolean).length*1000+p.data.length;  // 先比认出的字段数，再比数据量
+    if(score>bestScore){bestScore=score;best={name,tsv,rows:p.data.length,headRow:p.headRow}}
   }
-  if(!best) throw new Error("这个 Excel 文件里没有找到含「合同号」列的表，确认导出内容对不对，或改用「全选复制→粘贴」导入");
-  best.otherCandidates=candidates-1; // 除了选中的这个，还有几个 sheet 也像数据表
+  if(!best) throw new Error("这个 Excel 里没找到能识别的表：需要有「合同号」列，且下面有数据行。可以打开文件核对一下表头写法");
+  best.otherCandidates=candidates-1;
   return best;
 }
-async function loadImportFile(f){
-  if(XLSX_EXT.test(f.name)){
-    try{
-      const buf=await f.arrayBuffer();
-      const {name,tsv,otherCandidates}=xlsxToTSV(buf);
-      $("#pasteBox").value=tsv; preview(tsv);
-      say(`已从「${name}」sheet 读取`+(otherCandidates>0?`（工作簿里还有 ${otherCandidates} 个 sheet 看起来也是数据表，没读，需要的话单独复制粘贴）`:""));
-    }catch(e){ $("#importPreview").innerHTML=`<div class="critbox">${esc(e.message)}</div>` }
-    return;
+/* 按内容判断类型，不看文件名和后缀——用户的文件可能叫任何名字，
+   也可能是 WPS 存的、后缀被改过的，甚至没有后缀。
+   xlsx/xlsm 本质是 zip（PK 开头），xls 是复合文档（D0CF11E0 开头）。 */
+function sniffKind(bytes){
+  if(bytes.length>=4){
+    if(bytes[0]===0x50&&bytes[1]===0x4B)return "xlsx";                       // PK.. zip
+    if(bytes[0]===0xD0&&bytes[1]===0xCF&&bytes[2]===0x11&&bytes[3]===0xE0)return "xls";
   }
-  const r=new FileReader();
-  r.onload=()=>{$("#pasteBox").value=r.result;preview(r.result)};
-  r.readAsText(f,"utf-8");
+  return "text";
+}
+async function loadImportFile(f){
+  try{
+    const buf=await f.arrayBuffer();
+    const bytes=new Uint8Array(buf);
+    const kind=sniffKind(bytes);
+    if(kind==="text"){
+      const text=new TextDecoder("utf-8").decode(bytes);
+      $("#pasteBox").value=text; preview(text);
+      return;
+    }
+    const {name,tsv,otherCandidates,rows,headRow}=xlsxToTSV(bytes);
+    $("#pasteBox").value=tsv; preview(tsv);
+    say(`已读「${name}」：表头在第 ${headRow} 行，${rows} 行数据`
+      +(otherCandidates>0?`。工作簿里还有 ${otherCandidates} 个 sheet 也能识别，需要的话逐个导入`:""));
+  }catch(e){
+    $("#importPreview").innerHTML=`<div class="critbox">${esc(e.message)}</div>`;
+  }
 }
 function preview(text){
   const p=parseTable(text);
@@ -569,8 +588,9 @@ function preview(text){
   const nos=[...new Set(p.data.map(r=>r.contract_no))];
   const exist=nos.filter(n=>Store.be.all("contracts").some(c=>c.contract_no===n));
   PENDING=p;
-  box.innerHTML=`<div class="hint">识别为 <b>${p.isMaterial?"物料明细表":"合同台账表"}</b>：${p.data.length} 行 → ${nos.length} 份合同，
+  box.innerHTML=`<div class="hint">识别为 <b>${p.isMaterial?"物料明细表":"合同台账表"}</b>${p.headRow>1?`（表头在第 ${p.headRow} 行）`:""}：${p.data.length} 行 → ${nos.length} 份合同，
     其中 <b>${exist.length}</b> 份已存在将更新，<b>${nos.length-exist.length}</b> 份新增。
+    ${p.carried?`<br>有 <b>${p.carried}</b> 行的合同号是合并单元格（只有首行有值），已自动向下补齐。`:""}
     忽略的列：${esc(p.head.filter((h,i)=>!p.keys[i]).join("、")||"无")}</div>
     <div class="tw" style="max-height:230px;overflow:auto"><table><thead><tr>${p.keys.map((k,i)=>k?`<th class="no">${esc(p.head[i])}</th>`:"").join("")}</tr></thead>
     <tbody>${p.data.slice(0,6).map(r=>`<tr>${p.keys.filter(Boolean).map(k=>`<td>${esc(r[k])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>

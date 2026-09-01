@@ -402,22 +402,37 @@ function genPlan(o,c){
 
 /* ---------- 导入映射 ---------- */
 const MAP={
- "合同号":"contract_no","订单编号":"order_no","采购组织":"purchase_org","项目":"project","采购员":"purchaser",
- "合同名称":"contract_name","供应商":"supplier_name","供应商名称":"supplier_name","合同总额":"total_amount",
- "币别":"currency","币种":"currency","签订日期":"sign_date","约定交期":"contract_delivery_date",
- "采购计划到货日期":"contract_delivery_date","承诺交期":"promised_delivery_date","装箱单日期":"packing_list_date",
- "发货通知日期":"shipment_notice_date","要求到港日期":"required_arrival_date","物流负责人":"logistics_owner",
- "付款条件":"pay_condition_text","交货地址":"delivery_address","合同备注":"remark",
+ "合同号":"contract_no","合同编号":"contract_no",
+ "订单编号":"order_no","采购组织":"purchase_org","项目":"project",
+ "采购员":"purchaser","责任人":"purchaser","采购负责人":"purchaser",
+ "合同名称":"contract_name","供应商":"supplier_name","供应商名称":"supplier_name",
+ "合同总额":"total_amount","合同金额":"total_amount",
+ "币别":"currency","币种":"currency","签订日期":"sign_date","签订时间":"sign_date",
+ "约定交期":"contract_delivery_date","采购计划到货日期":"contract_delivery_date",
+ "计划交货日期":"contract_delivery_date","计划交期":"contract_delivery_date","要求交货日期":"contract_delivery_date",
+ "承诺交期":"promised_delivery_date","供应商承诺交期":"promised_delivery_date",
+ "装箱单日期":"packing_list_date","发货通知日期":"shipment_notice_date",
+ "要求到港日期":"required_arrival_date","计划到货日期":"required_arrival_date",
+ "物流负责人":"logistics_owner","付款条件":"pay_condition_text","付款方式":"pay_condition_text",
+ "交货地址":"delivery_address","计划到货地点":"delivery_address","到货地点":"delivery_address",
+ "合同备注":"remark","运输方式":"transport_mode",
  "已到货金额":"_arr","已开票金额":"_inv","已支付金额":"_paid","已付款金额":"_paid",
- "行号":"line_no","物料编码":"material_code","物料名称":"material_name","规格型号":"spec","单位":"unit",
- "订购数量":"plan_qty","含税单价":"price_tax_in","价税合计":"amount_tax_in","税率":"tax_rate",
- "物料品牌":"brand","信息编码":"info_code","需求人":"demand_user","订单行备注":"line_remark"
+ "行号":"line_no","序号":"line_no",
+ "物料编码":"material_code","物料名称":"material_name","品名":"material_name","物资名称":"material_name",
+ "规格型号":"spec","规格":"spec","单位":"unit",
+ "订购数量":"plan_qty","数量":"plan_qty",
+ "含税单价":"price_tax_in","单价":"price_tax_in",
+ "价税合计":"amount_tax_in","含税总价":"amount_tax_in","含税金额":"amount_tax_in","总价":"amount_tax_in",
+ "税率":"tax_rate","物料品牌":"brand","品牌":"brand",
+ "信息编码":"info_code","请购信息":"info_code","请购单号":"info_code",
+ "需求人":"demand_user","订单行备注":"line_remark","备注":"line_remark","单重/千克":"unit_weight"
 };
 const DATE_FIELDS=["sign_date","contract_delivery_date","promised_delivery_date","packing_list_date","shipment_notice_date","required_arrival_date"];
 const HEAD_FIELDS=["order_no","purchase_org","project","purchaser","contract_name","supplier_name","currency",
   "sign_date","contract_delivery_date","promised_delivery_date","packing_list_date","shipment_notice_date",
   "required_arrival_date","logistics_owner","pay_condition_text","delivery_address","remark"];
 
+const cleanHead=h=>String(h||"").trim().replace(/^﻿/,"").replace(/[▲▼①②③]/g,"").replace(/\s+/g,"");
 function parseTable(text){
   const t=String(text||"").replace(/\r/g,"").trim(); if(!t)return null;
   const lines=t.split("\n").filter(l=>l.trim()!=="");
@@ -430,9 +445,41 @@ function parseTable(text){
       if(q){ if(ch==='"'){ if(l[i+1]==='"'){cur+='"';i++} else q=false } else cur+=ch }
       else { if(ch==='"')q=true; else if(ch===","){out.push(cur);cur=""} else cur+=ch }}
     out.push(cur);return out};
-  const head=split(lines[0]).map(h=>h.trim().replace(/^﻿/,"").replace(/[▲▼①②③\s]/g,""));
+  /* 表头不一定在第一行。国内的表常见「大标题 + 分组表头 + 真表头」三层结构
+     （例如第1行"刚果物资明细表"、第2~3行"采购信息/合同参数"、第4行才是
+     合同号|供应商|…）。所以在前 15 行里挑"认出字段最多且含合同号"的那一行，
+     它下面才是数据。 */
+  const LOOK=Math.min(15,lines.length-1);
+  let headIdx=-1,bestScore=0;
+  for(let i=0;i<LOOK;i++){
+    const cells=split(lines[i]).map(cleanHead);
+    const hits=cells.filter(h=>MAP[h]).length;
+    if(!cells.map(h=>MAP[h]).includes("contract_no"))continue;
+    if(hits>bestScore){bestScore=hits;headIdx=i}
+  }
+  if(headIdx<0)return {error:"没有找到「合同号」列。请确认复制/导出的内容里带着表头行（系统会在前 15 行里自动找表头）"};
+  const head=split(lines[headIdx]).map(cleanHead);
   const keys=head.map(h=>MAP[h]||null);
-  if(!keys.includes("contract_no"))return {error:"没有找到「合同号」列，请确认复制时带上了表头行"};
-  const data=lines.slice(1).map(l=>{const cs=split(l),r={};keys.forEach((k,i)=>{if(k)r[k]=(cs[i]||"").trim()});return r}).filter(r=>r.contract_no);
-  return {head,keys,data,isMaterial:keys.includes("material_code")||keys.includes("material_name")};
+  const raw=lines.slice(headIdx+1).map(l=>{const cs=split(l),r={};keys.forEach((k,i)=>{if(k)r[k]=(cs[i]||"").trim()});return r});
+
+  /* 合并单元格向下补齐。同一份合同的多行物料，Excel 里常把合同号、供应商、
+     日期等合同级字段合并成一格，导出后只有第一行有值，后面全是空。
+     不补的话这些行会因为"没有合同号"被整行丢掉——实测用户的表 2103 行物料
+     里有 1713 行是这种情况，会丢掉八成数据。
+     只在这一行确实有物料内容时才继承，避免把表格末尾的空行也带上。 */
+  const CARRY=["contract_no","supplier_name","sign_date","contract_delivery_date",
+    "promised_delivery_date","delivery_address","pay_condition_text","purchaser",
+    "order_no","purchase_org","project","currency","logistics_owner","transport_mode","contract_name"];
+  const last={};
+  let carried=0;
+  for(const r of raw){
+    const hasContent=(r.material_name||r.material_code||r.spec||r.plan_qty||r.amount_tax_in);
+    for(const k of CARRY){
+      if(r[k])last[k]=r[k];
+      else if(hasContent&&last[k]){ r[k]=last[k]; if(k==="contract_no")carried++ }
+    }
+  }
+  const data=raw.filter(r=>r.contract_no&&!MAP[cleanHead(r.contract_no)]);  // 跳过重复出现的表头行
+  return {head,keys,data,headRow:headIdx+1,carried,
+    isMaterial:keys.includes("material_code")||keys.includes("material_name")};
 }
