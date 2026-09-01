@@ -75,6 +75,7 @@ const LocalBackend={
   async flush(){ this.data.meta.updated=nowTS(); await IDB.put("kv","db",this.data) },
   all(t){ return (this.data[t]||[]).slice() },
   async insert(t,row){ row.id=row.id||uid(t[0]); this.data[t].push(row); await this.flush(); return row },
+  async insertMany(t,rows){ if(!rows||!rows.length)return []; rows.forEach(r=>{r.id=r.id||uid(t[0]);this.data[t].push(r)}); await this.flush(); return rows },
   async update(t,id,patch){ const r=this.data[t].find(x=>x.id===id); if(r)Object.assign(r,patch); await this.flush(); return r },
   async remove(t,id){ this.data[t]=this.data[t].filter(x=>x.id!==id); await this.flush() },
   async removeWhere(t,fn){ this.data[t]=this.data[t].filter(x=>!fn(x)); await this.flush() },
@@ -277,6 +278,20 @@ const CloudBackend={
     const r=await this.rest(t,{method:"POST",headers:{Prefer:"return=representation"},body:JSON.stringify(row)});
     const saved=(r&&r[0])||row; this.data[t].push(saved); return saved;
   },
+  /* 批量插入：一次 POST 一个数组（PostgREST 原生支持），500 一批避免请求体过大。
+     导入几千行物料时，从"一行一个请求"降到十几个请求，快一两个数量级。 */
+  async insertMany(t,rows){
+    if(!rows||!rows.length)return [];
+    rows.forEach(r=>{r.id=r.id||uid(t[0])});
+    const out=[];
+    for(let i=0;i<rows.length;i+=500){
+      const batch=rows.slice(i,i+500);
+      const r=await this.rest(t,{method:"POST",headers:{Prefer:"return=representation"},body:JSON.stringify(batch)});
+      const saved=(r&&r.length)?r:batch;
+      saved.forEach(x=>this.data[t].push(x)); out.push(...saved);
+    }
+    return out;
+  },
   async update(t,id,patch){
     await this.rest(t+"?id=eq."+encodeURIComponent(id),{method:"PATCH",body:JSON.stringify(patch)});
     const r=this.data[t].find(x=>x.id===id); if(r)Object.assign(r,patch); return r;
@@ -285,23 +300,52 @@ const CloudBackend={
     await this.rest(t+"?id=eq."+encodeURIComponent(id),{method:"DELETE"});
     this.data[t]=this.data[t].filter(x=>x.id!==id);
   },
+  /* 按条件批量删除：本地先算出要删哪些 id，再用一条 id=in.(...) 一次删掉，
+     而不是每行发一个 DELETE。删一份带几十行物料的合同从几十个请求降到一两个。
+     id 太多会撑爆 URL 长度，按 100 个一批切开。 */
   async removeWhere(t,fn){
     const gone=this.data[t].filter(fn);
-    for(const g of gone) await this.remove(t,g.id);
+    if(!gone.length)return;
+    const ids=gone.map(g=>g.id);
+    for(let i=0;i<ids.length;i+=100){
+      /* 每个 id 用双引号包起来再整体百分号编码，逗号分隔符保持原样——
+         这样即使 id 里含特殊字符也不会被 PostgREST 误当成分隔符。 */
+      const list=ids.slice(i,i+100).map(x=>encodeURIComponent('"'+String(x).replace(/"/g,'\\"')+'"')).join(",");
+      await this.rest(t+"?id=in.("+list+")",{method:"DELETE"});
+    }
+    const goneSet=new Set(ids);
+    this.data[t]=this.data[t].filter(x=>!goneSet.has(x.id));
   },
   /* 整库替换：还原备份、清空数据都走这里。
-     顺序很重要——先删子表再删主表，否则外键会挡住；写回时反过来。 */
+     顺序很重要——先删子表再删主表，否则外键会挡住；写回时反过来（主表先）。
+
+     回滚保护：这是唯一一条会"先把线上库删光"的路径。以前写回中途一旦失败
+     （断网 / 请求体过大 / RLS 拦截），旧数据已删、新数据只进去一半，等于
+     还原备份反而把数据搞没了。现在删库前先在内存里存一份全量快照，写回失败
+     就尽最大努力回滚到操作前的状态，并明确告诉用户当前处于什么状态。 */
   async replaceAll(next){
     const CHILD=["materials","arrivals","invoices","payments","payplans","attachments","audit"];
-    for(const t of CHILD) await this.rest(t+"?id=not.is.null",{method:"DELETE"});
-    await this.rest("contracts?id=not.is.null",{method:"DELETE"});
-    for(const t of ["contracts",...CHILD]){
-      const rows=(next&&next[t])||[];
-      if(!rows.length)continue;
-      /* 分批写，避免一次请求体过大被网关拒掉 */
-      for(let i=0;i<rows.length;i+=500){
-        await this.rest(t,{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(rows.slice(i,i+500))});
+    const ORDER=["contracts",...CHILD];               // 写回顺序：主表先，子表后
+    const backup={}; for(const t of ORDER) backup[t]=this.all(t);   // 删库前的安全副本
+    const wipe=async()=>{
+      for(const t of CHILD) await this.rest(t+"?id=not.is.null",{method:"DELETE"});
+      await this.rest("contracts?id=not.is.null",{method:"DELETE"});
+    };
+    const writeBack=async src=>{
+      for(const t of ORDER){
+        const rows=(src&&src[t])||[];
+        for(let i=0;i<rows.length;i+=500){   // 分批写，避免一次请求体过大被网关拒掉
+          await this.rest(t,{method:"POST",headers:{Prefer:"return=minimal"},body:JSON.stringify(rows.slice(i,i+500))});
+        }
       }
+    };
+    try{
+      await wipe();
+      await writeBack(next);
+    }catch(e){
+      try{ await wipe(); await writeBack(backup); }
+      catch(e2){ throw new Error("还原失败，且自动回滚也没成功——数据库可能处于不完整状态，请不要再做写操作，尽快用最近一次导出的备份手动恢复。原始错误："+e.message+"｜回滚错误："+e2.message); }
+      throw new Error("还原失败，已自动回滚到操作前的数据（未发生改动）。原因："+e.message);
     }
     await this.loadAll();
   },

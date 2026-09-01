@@ -610,12 +610,11 @@ async function doImport(){
     else { await Store.be.update("contracts",o.id,patch); updated++; }
     if(p.isMaterial){
       await Store.be.removeWhere("materials",m=>m.contract_id===o.id);
-      for(const r of rs.filter(r=>r.material_code||r.material_name)){
-        await Store.be.insert("materials",{contract_id:o.id,line_no:r.line_no||"",material_code:r.material_code||"",
-          material_name:r.material_name||"",spec:r.spec||"",unit:r.unit||"",plan_qty:num(r.plan_qty),
-          price_tax_in:num(r.price_tax_in),amount_tax_in:num(r.amount_tax_in),brand:r.brand||"",info_code:r.info_code||""});
-        mats++;
-      }
+      /* 攒成数组一次批量插入，而不是一行一个请求——几千行物料时快一两个数量级 */
+      const mrows=rs.filter(r=>r.material_code||r.material_name).map(r=>({contract_id:o.id,line_no:r.line_no||"",material_code:r.material_code||"",
+        material_name:r.material_name||"",spec:r.spec||"",unit:r.unit||"",plan_qty:num(r.plan_qty),
+        price_tax_in:num(r.price_tax_in),amount_tax_in:num(r.amount_tax_in),brand:r.brand||"",info_code:r.info_code||""}));
+      if(mrows.length){ await Store.be.insertMany("materials",mrows); mats+=mrows.length; }
       if(!num(o.total_amount)){
         const sum=Store.be.all("materials").filter(m=>m.contract_id===o.id).reduce((s,m)=>s+(+m.amount_tax_in||0),0);
         await Store.be.update("contracts",o.id,{total_amount:sum});
