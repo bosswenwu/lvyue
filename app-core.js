@@ -77,6 +77,12 @@ const LocalBackend={
   async insert(t,row){ row.id=row.id||uid(t[0]); this.data[t].push(row); await this.flush(); return row },
   async insertMany(t,rows){ if(!rows||!rows.length)return []; rows.forEach(r=>{r.id=r.id||uid(t[0]);this.data[t].push(r)}); await this.flush(); return rows },
   async update(t,id,patch){ const r=this.data[t].find(x=>x.id===id); if(r)Object.assign(r,patch); await this.flush(); return r },
+  /* 乐观锁条件更新：只有当前 version 仍等于 expectVer 才写。冲突返回 {row:null}。 */
+  async updateVersioned(t,id,patch,expectVer){
+    const r=this.data[t].find(x=>x.id===id);
+    if(r&&(+r.version||0)!==(+expectVer||0)) return {row:null,locked:true};
+    if(r)Object.assign(r,patch); await this.flush(); return {row:r||null,locked:true};
+  },
   async remove(t,id){ this.data[t]=this.data[t].filter(x=>x.id!==id); await this.flush() },
   async removeWhere(t,fn){ this.data[t]=this.data[t].filter(x=>!fn(x)); await this.flush() },
   async replaceAll(next){ this.data=next; await this.flush() },
@@ -101,7 +107,8 @@ const LocalBackend={
     const u=this.data.users.find(x=>x.id===id); if(!u)throw new Error("用户不存在");
     u.salt=uid("s"); u.pw=await hashPw(password,u.salt); u.mustChange=1; await this.flush(); return u;
   },
-  async setUser(id,patch){ const u=this.data.users.find(x=>x.id===id); if(u)Object.assign(u,patch); await this.flush(); return u }
+  async setUser(id,patch){ const u=this.data.users.find(x=>x.id===id); if(u)Object.assign(u,patch); await this.flush(); return u },
+  async setUserName(id,name){ return this.setUser(id,{name}) }
 };
 
 /* ============================================================
@@ -234,6 +241,10 @@ const CloudBackend={
   async setUserRole(targetId,newRole,newDisabled){
     await this.rest("rpc/set_user_role",{method:"POST",body:JSON.stringify({target_id:targetId,new_role:newRole,new_disabled:newDisabled})});
   },
+  /* 改名走 set_user_name() 函数：管理员可改任何人，本人可改自己，函数内部校验 */
+  async setUserName(targetId,name){
+    await this.rest("rpc/set_user_name",{method:"POST",body:JSON.stringify({target_id:targetId,new_name:name})});
+  },
   logout(){ this.token=null; this.user=null; localStorage.removeItem("lvyue_sess") },
   /* 用 anon key 的 signUp 建号：管理员点一下就生成账号+随机密码。
      email 必须是真实可达的邮箱域名（不必是本人常用邮箱，但域名要存在）。
@@ -295,6 +306,17 @@ const CloudBackend={
   async update(t,id,patch){
     await this.rest(t+"?id=eq."+encodeURIComponent(id),{method:"PATCH",body:JSON.stringify(patch)});
     const r=this.data[t].find(x=>x.id===id); if(r)Object.assign(r,patch); return r;
+  },
+  /* 乐观锁条件更新：PATCH 时带 version=eq.<expectVer> 过滤，只有没被别人改过才命中。
+     return=representation 拿回受影响的行——为空说明 version 已经变了（有人抢先改了），
+     返回 {row:null} 交给上层提示冲突。version 列不存在（迁移没跑）时不该走到这里，
+     上层用「加载到的行里有没有 version 字段」来决定用不用锁。 */
+  async updateVersioned(t,id,patch,expectVer){
+    const r=await this.rest(t+"?id=eq."+encodeURIComponent(id)+"&version=eq."+(+expectVer||0),
+      {method:"PATCH",headers:{Prefer:"return=representation"},body:JSON.stringify(patch)});
+    const row=(r&&r[0])||null;
+    if(row){ const c=this.data[t].find(x=>x.id===id); if(c)Object.assign(c,patch); }
+    return {row,locked:true};
   },
   async remove(t,id){
     await this.rest(t+"?id=eq."+encodeURIComponent(id),{method:"DELETE"});

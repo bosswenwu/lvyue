@@ -121,12 +121,15 @@ async function login(u,p){
     const el=$("#loginErr"); if(el)el.innerHTML=`<div class="critbox" style="margin-top:10px">${esc(m)}</div>`; else say(m);
   }
 }
-function enter(){
-  $("#gate").hidden=true; $("#app").hidden=false;
+function renderWho(){
   $("#who").innerHTML=`<div class="avatar">${esc((ME.name||ME.username).slice(0,1))}</div>
     <div style="line-height:1.25"><div style="font-size:12px;font-weight:600">${esc(ME.name||ME.username)}</div>
     <div style="font-size:10px;color:var(--ink-3)">${ME.role==="admin"?"管理员":"成员"}</div></div>
     <button class="iconbtn" id="logout" style="margin-left:6px">退出</button>`;
+}
+function enter(){
+  $("#gate").hidden=true; $("#app").hidden=false;
+  renderWho();
   $("#navUsers").hidden=ME.role!=="admin";
   $("#railFoot").innerHTML=Store.be.kind==="cloud"?"云端库 · 多人共用":"本机浏览器存储<br>请定期备份";
   reload(); go("home");
@@ -515,7 +518,26 @@ async function saveContract(id){
   if(id){
     const old=VIEWDATA.find(v=>v.o.id===id).o;
     const changed=Object.keys(f).filter(k=>String(old[k]??"")!==String(f[k]??""));
-    await Store.be.update("contracts",id,f);
+    /* 乐观锁：只有当加载到的合同带 version 字段（说明 Supabase 已加了 version 列）
+       才启用条件更新，防止两人同时编辑互相覆盖；没有该字段（迁移还没跑或本机旧数据）
+       就退回原来的普通更新，功能不受影响。 */
+    if("version" in old){
+      const expectVer=+old.version||0;
+      const res=await Store.be.updateVersioned("contracts",id,Object.assign({},f,{version:expectVer+1}),expectVer);
+      if(res.locked&&!res.row){
+        /* 冲突：编辑期间被别人改过。拉回这份合同的最新版，重新打开表单让用户核对。 */
+        closeModal();
+        if(Store.be.kind==="cloud"){
+          try{ const rows=await CloudBackend.rest("contracts?id=eq."+encodeURIComponent(id));
+            if(rows&&rows[0]){ const i=CloudBackend.data.contracts.findIndex(c=>c.id===id); if(i>=0)CloudBackend.data.contracts[i]=rows[0]; } }catch(e){}
+        }
+        reload();refreshPage();if(curId){drawHead();drawTab()}
+        editContract(id);
+        return say("这份合同在你编辑期间被其他人改动了，已刷新到最新版本，请核对后重新保存");
+      }
+    }else{
+      await Store.be.update("contracts",id,f);
+    }
     if(changed.length)await logIt(id,"修改："+changed.join("、"));
   }else{
     if(Store.be.all("contracts").some(c=>c.contract_no===f.contract_no))return say("合同号已存在");
@@ -742,7 +764,8 @@ async function renderUsers(){
     <td>${u.role==="admin"?'<span class="pill info">管理员</span>':'<span class="pill mute">成员</span>'}</td>
     <td class="mono">${esc(u.created||"")}</td>
     <td>${u.disabled?'<span class="pill crit">已停用</span>':'<span class="pill ok">正常</span>'}</td>
-    <td class="r"><button class="btn" data-resetu="${u.id}" style="padding:2px 7px">重置密码</button>
+    <td class="r"><button class="btn" data-renameu="${u.id}" data-name="${esc(u.name||"")}" style="padding:2px 7px">改名</button>
+    <button class="btn" data-resetu="${u.id}" style="padding:2px 7px">重置密码</button>
     ${u.id===ME.id?"":`<button class="btn danger" data-toggleu="${u.id}" style="padding:2px 7px">${u.disabled?"启用":"停用"}</button>`}</td></tr>`).join("")
     ||`<tr><td colspan="6" class="empty">还没有其他账号</td></tr>`;
 }
@@ -758,7 +781,8 @@ async function renderUsersCloud(){
     <td>${u.role==="admin"?'<span class="pill info">管理员</span>':'<span class="pill mute">成员</span>'}</td>
     <td class="mono">${esc(String(u.created_at||"").slice(0,16).replace("T"," "))}</td>
     <td>${u.disabled?'<span class="pill crit">已停用</span>':'<span class="pill ok">正常</span>'}</td>
-    <td class="r">${u.id===ME.id?'<span style="color:var(--ink-3);font-size:11px">这是你自己</span>':`
+    <td class="r"><button class="btn" data-renameu="${u.id}" data-name="${esc(u.name||"")}" style="padding:2px 7px">改名</button>
+    ${u.id===ME.id?'<span style="color:var(--ink-3);font-size:11px;margin-left:6px">这是你自己</span>':`
     <button class="btn" data-cloudrole="${u.id}" data-role="${u.role==="admin"?"user":"admin"}" data-disabled="${u.disabled}" style="padding:2px 7px">${u.role==="admin"?"设为成员":"设为管理员"}</button>
     <button class="btn danger" data-cloudtoggle="${u.id}" data-role="${u.role}" data-disabled="${!u.disabled}" style="padding:2px 7px">${u.disabled?"启用":"停用"}</button>`}</td></tr>`).join("")
     ||`<tr><td colspan="6" class="empty">还没有其他账号</td></tr>`;
@@ -796,6 +820,33 @@ async function resetUser(id){
     <div class="row"><button class="btn" data-copycred="${esc(u.username)}|${esc(pw)}">复制</button>
     <button class="btn" data-hidecred>隐藏</button></div></div>`;
   await renderUsers();
+}
+/* 改名：管理员可改任何人；本人可改自己。云端走 set_user_name() 函数（profiles 表
+   只读，写必须过函数）；本机直接改 users 表。 */
+function renameUserModal(id,cur){
+  modal("修改姓名",`<div class="form">
+    <label class="wide"><span>姓名</span><input id="ruName" value="${esc(cur||"")}" placeholder="填新的姓名"></label></div>
+    <div class="hint">这里改的是显示姓名，不影响登录账号，也不动权限。</div>`,
+    `<div class="spacer"></div><button class="btn" data-close>取消</button><button class="btn pri" data-act="saveName" data-id="${esc(id)}">保存</button>`);
+}
+async function saveUserName(id){
+  const name=$("#ruName").value.trim();
+  if(!name)return say("姓名不能为空");
+  try{ await Store.be.setUserName(id,name); }
+  catch(e){
+    if(/set_user_name|PGRST202|not find|404/i.test(e.message))
+      return say("改名功能需要先在 Supabase 后台跑一次 schema_v3.sql（新增 set_user_name 函数）");
+    return say(e.message.includes("权限")?"没有权限修改这个账号的姓名":e.message);
+  }
+  closeModal();
+  /* 改的是自己 → 同步内存里的 ME、右上角显示、以及本地会话缓存 */
+  if(ME&&id===ME.id){
+    ME.name=name; renderWho();
+    if(Store.be.kind==="cloud"){ CloudBackend.user.name=name;
+      localStorage.setItem("lvyue_sess",JSON.stringify({token:CloudBackend.token,user:CloudBackend.user,stamp:CloudBackend.stamp()})); }
+    else sessionStorage.setItem("ly_me",JSON.stringify(ME));
+  }
+  await renderUsers(); say("姓名已更新");
 }
 
 /* ================= 路由 ================= */
@@ -859,6 +910,7 @@ document.addEventListener("click",async e=>{
     if(t.id==="attBulkDrop")return $("#attBulkFile").click();
     if(t.id==="doBulkAtt")return doBulkAttach();
     if(t.id==="cancelBulkAtt"){BULK=null;$("#attBulkPreview").innerHTML="";return}
+    const rn=t.closest("[data-renameu]"); if(rn)return renameUserModal(rn.dataset.renameu,rn.dataset.name);
     const ru=t.closest("[data-resetu]"); if(ru)return resetUser(ru.dataset.resetu);
     const cr=t.closest("[data-cloudrole]")||t.closest("[data-cloudtoggle]");
     if(cr){
@@ -887,6 +939,7 @@ document.addEventListener("click",async e=>{
       if(a==="saveEvent")return saveEvent(act.dataset.type,act.dataset.plan||null);
       if(a==="saveArrLines")return saveArrLines();
       if(a==="createUser")return createUser();
+      if(a==="saveName")return saveUserName(act.dataset.id);
       if(a==="genplan"){await genPlansFor([CUR()]);drawTab();refreshPage();return}
       if(a==="clearplan"){await Store.be.removeWhere("payplans",p=>p.contract_id===curId);reload();await genPlansFor([CUR()]);drawTab();refreshPage();return}
       if(a==="void"){
@@ -1033,7 +1086,9 @@ window.LY={
   saveContract,editContract,preview,doImport,genPlansFor,createUser,newUserModal,
   matchFileToContract,bulkPickFiles,doBulkAttach,loadImportFile,xlsxToTSV,
   get BULK(){return BULK}, set BULK(v){BULK=v},
-  resetUser,renderUsers,shortRows,renderShort,filtered,reload,refreshPage,csv
+  resetUser,renderUsers,renderUsersCloud,renameUserModal,saveUserName,renderWho,
+  shortRows,renderShort,filtered,reload,refreshPage,csv,
+  get ME2(){return ME}, set ME2(v){ME=v}
 };
 
 boot();
