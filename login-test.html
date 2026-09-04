@@ -137,6 +137,58 @@ const vis=(w,sel)=>{const el=w.document.querySelector(sel);if(!el)return false;c
     w.localStorage.removeItem("lvyue_sess");
   }
 
+
+  /* ===== 云端建号走 Edge Function =====
+     公开注册关掉后，/auth/v1/signup 不能再用；建号需要 service_role，
+     而它不能出现在前端，所以挪到 Edge Function。这里打桩验证前端这一侧。 */
+  {
+    const CB=w.LY.CloudBackend;
+    const realFetch=w.fetch;
+    let lastReq=null, mode="ok";
+    w.fetch=async(url,opt)=>{
+      const u=String(url);
+      if(u.includes("/functions/v1/admin-create-user")){
+        lastReq={u,opt,auth:((opt&&opt.headers)||{}).Authorization,apikey:((opt&&opt.headers)||{}).apikey};
+        const res=(o,st)=>({ok:(st||200)<400,status:st||200,json:async()=>o,text:async()=>JSON.stringify(o)});
+        if(mode==="ok")       return res({id:"u9",email:JSON.parse(opt.body).email,name:"新同事"});
+        if(mode==="notdep")   return res({},404);
+        if(mode==="notadmin") return res({error:"只有管理员能新建账号"},403);
+        if(mode==="dup")      return res({error:"这个邮箱已经建过账号了"},409);
+        if(mode==="offline")  throw new TypeError("Failed to fetch");
+      }
+      return realFetch(url,opt);
+    };
+    CB.url="https://stub.supabase.co"; CB.key="stub_key";
+    CB.token="T1"; CB.refresh=null; CB.expAt=0; CB.user={id:"admin1"};
+
+    mode="ok";
+    const made=await CB.createUser({username:"newbie@qq.com",name:"新同事",password:"Abcd2345!x"});
+    ok("建号_调的是Edge Function",/\/functions\/v1\/admin-create-user$/.test(lastReq.u),lastReq.u);
+    ok("建号_带上调用者令牌",lastReq.auth==="Bearer T1",String(lastReq.auth));
+    ok("建号_带上apikey",lastReq.apikey==="stub_key",String(lastReq.apikey));
+    ok("建号_成功返回",made.email==="newbie@qq.com",JSON.stringify(made));
+    /* 绝不能把 role 交给前端决定——传了也必须不生效，这里确认前端压根不发 */
+    ok("建号_不发送role字段",!("role" in JSON.parse(lastReq.opt.body)),lastReq.opt.body);
+    /* 更要命的是 service_role 绝不能出现在任何前端请求里 */
+    ok("建号_请求里没有service_role",!/service_role|eyJ.*role.*service/.test(JSON.stringify(lastReq)),"ok");
+
+    const grab=async()=>{try{await CB.createUser({username:"x@qq.com",name:"x",password:"Abcd2345!x"});return""}catch(e){return e.message}};
+    mode="notdep";
+    const m1=await grab();
+    ok("建号_未部署时给出可操作指引",/Edge Functions|Add user/.test(m1)&&m1.length>60,m1.slice(0,70));
+    mode="notadmin";
+    ok("建号_非管理员被拒",/只有管理员/.test(await grab()),"");
+    mode="dup";
+    ok("建号_重复邮箱有专门提示",/已经建过/.test(await grab()),"");
+    mode="offline";
+    ok("建号_连不上时不误报成密码问题",/连不上建号服务/.test(await grab()),"");
+    /* 邮箱格式在前端就拦掉，省一次往返 */
+    let bad=""; try{ await CB.createUser({username:"没有at符号",name:"x",password:"Abcd2345!x"}) }catch(e){ bad=e.message }
+    ok("建号_非邮箱本地拦截",/完整邮箱/.test(bad),bad.slice(0,40));
+
+    w.fetch=realFetch; CB.logout();
+  }
+
  }catch(e){ L.push("FAIL 异常 "+e.message) }
  const fails=L.filter(x=>x.startsWith("FAIL")).length;
  const out=(fails?"FAILED("+fails+")":"ALLPASS("+L.length+")")+"\n"+L.join("\n");

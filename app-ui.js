@@ -907,7 +907,15 @@ async function createUser(){
   if(cloud&&!username.includes("@"))return say("云端模式下账号是邮箱地址，请输入完整邮箱");
   const pw=randPw(12);
   try{ await Store.be.createUser({username,name,role,password:pw}); }
-  catch(e){ return say(e.message) }
+  catch(e){
+    /* 建号失败的原因经常需要照着做几步（比如函数没部署时的部署指引），
+       塞进 2.6 秒就消失的 toast 里根本看不完。长文案改成留在页面上。 */
+    if(e.message.length>60){
+      closeModal();
+      $("#newCred").innerHTML=`<div class="critbox">${esc(e.message)}</div>`;
+    } else say(e.message);
+    return;
+  }
   closeModal();await renderUsers();
   $("#newCred").innerHTML=`<div class="cred"><div class="eyebrow">新账号已创建，密码只显示这一次</div>
     <div class="row"><span>账号</span><code>${esc(username)}</code></div>

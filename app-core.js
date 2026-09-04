@@ -313,27 +313,34 @@ const CloudBackend={
      email 必须是真实可达的邮箱域名（不必是本人常用邮箱，但域名要存在）。
      新账号一律从「成员」开始——role 字段即使传了也会被数据库触发器忽略，
      要升管理员必须已登录的管理员调用 setUserRole()。 */
+  /* 建号走 Edge Function，不再走公开注册。
+     公开注册必须关掉（本仓库公开、key 在代码里、RLS 又是任何登录用户可读写
+     全部数据），关掉之后 /auth/v1/signup 就用不了了。真正建号需要 service_role
+     密钥，而它绝对不能出现在前端——那等于把整个数据库的钥匙公开。
+     所以建号挪到服务端函数里：service_role 只存在于函数的环境变量中，浏览器
+     拿不到；函数自己会校验调用者确实是管理员（见 supabase/functions/
+     admin-create-user/index.ts 的注释）。
+     函数没部署时不要报一句看不懂的话，明确给出两条可行路径。 */
   async createUser({username,name,password}){
     const email=String(username||"").trim();
     if(!email.includes("@"))throw new Error("云端模式下账号是邮箱地址，请输入完整邮箱，例如 zhangsan@qq.com");
-    const r=await fetch(this.url+"/auth/v1/signup",{method:"POST",headers:{apikey:this.key,"Content-Type":"application/json"},
-      body:JSON.stringify({email,password,data:{name}})});
-    if(!r.ok){
-      const body=await r.json().catch(()=>({}));
-      if(body.error_code==="email_address_invalid")throw new Error("这个邮箱地址被判定为无效，换一个真实域名的邮箱试试（如 qq.com / 163.com / gmail.com）");
-      if(body.msg&&/already registered/i.test(body.msg))throw new Error("这个邮箱已经建过账号了");
-      /* 这个按钮走的是 Supabase 的公开注册接口。把公开注册开着，等于任何人拿到
-         代码里的 publishable key（本仓库是公开的）就能自己注册一个账号登进来，
-         而数据表的 RLS 是「任何登录用户可读写全部」——所以注册必须关掉。
-         关掉之后这个按钮就用不了了，这不是故障，是安全设置的必然结果。
-         报错要说清楚怎么办，而不是把 Supabase 的英文原文甩给用户。 */
-      if(body.error_code==="signup_disabled"||/signups? not allowed/i.test(body.msg||""))
-        throw new Error("公开注册已关闭（这是对的，否则任何人都能自己注册进来看数据），所以这里不能直接建号。"+
-          "请到 Supabase 后台 Authentication → Users → Add user 手工创建，勾选 Auto Confirm User，"+
-          "把邮箱和密码发给同事即可；新账号默认是「成员」，需要升管理员就在本页列表里点「设为管理员」。");
-      throw new Error("建号失败："+(body.msg||JSON.stringify(body)).slice(0,160));
+    let r;
+    try{
+      r=await this.authFetch(this.url+"/functions/v1/admin-create-user",
+        {method:"POST",headers:{"Content-Type":"application/json"},
+         body:JSON.stringify({email,password,name})});
+    }catch(e){
+      throw new Error("连不上建号服务。检查网络；若网络正常，多半是建号函数还没部署——"+
+        "可以先到 Supabase 后台 Authentication → Users → Add user 手工建号（记得勾 Auto Confirm User）。");
     }
-    return await r.json();
+    if(r.status===404)
+      throw new Error("建号函数还没部署，所以暂时不能在这里建号。两个办法："+
+        "①（推荐，一次性）Supabase 控制台 → Edge Functions → Deploy a new function，名字填 "+
+        "admin-create-user，把仓库里 supabase/functions/admin-create-user/index.ts 的内容粘进去部署；"+
+        "② 每次到 Authentication → Users → Add user 手工建，记得勾选 Auto Confirm User。");
+    const body=await r.json().catch(()=>({}));
+    if(!r.ok)throw new Error(body.error||("建号失败（HTTP "+r.status+"）"));
+    return body;
   },
   /* 分页读到底。原来固定 limit=5000，超出的行会被静默丢掉——
      物料明细最容易超（几百份合同就能到几千行），而且丢了完全没有提示，
