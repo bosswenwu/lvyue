@@ -322,6 +322,15 @@ const CloudBackend={
       const body=await r.json().catch(()=>({}));
       if(body.error_code==="email_address_invalid")throw new Error("这个邮箱地址被判定为无效，换一个真实域名的邮箱试试（如 qq.com / 163.com / gmail.com）");
       if(body.msg&&/already registered/i.test(body.msg))throw new Error("这个邮箱已经建过账号了");
+      /* 这个按钮走的是 Supabase 的公开注册接口。把公开注册开着，等于任何人拿到
+         代码里的 publishable key（本仓库是公开的）就能自己注册一个账号登进来，
+         而数据表的 RLS 是「任何登录用户可读写全部」——所以注册必须关掉。
+         关掉之后这个按钮就用不了了，这不是故障，是安全设置的必然结果。
+         报错要说清楚怎么办，而不是把 Supabase 的英文原文甩给用户。 */
+      if(body.error_code==="signup_disabled"||/signups? not allowed/i.test(body.msg||""))
+        throw new Error("公开注册已关闭（这是对的，否则任何人都能自己注册进来看数据），所以这里不能直接建号。"+
+          "请到 Supabase 后台 Authentication → Users → Add user 手工创建，勾选 Auto Confirm User，"+
+          "把邮箱和密码发给同事即可；新账号默认是「成员」，需要升管理员就在本页列表里点「设为管理员」。");
       throw new Error("建号失败："+(body.msg||JSON.stringify(body)).slice(0,160));
     }
     return await r.json();
