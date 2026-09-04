@@ -677,66 +677,115 @@ async function doImport(){
   const btn=$("#doImport"); if(btn){btn.disabled=true;btn.textContent="导入中…"}
   const bar=$("#importPreview");
   const t0=Date.now();
-  let added=0,updated=0,mats=0,arrN=0,done=0;
-  const auditRows=[];
-  /* 让浏览器有机会重绘。云端模式每次 await fetch 本来就会让出，
-     但本机模式（IndexedDB）快到根本不让出，不主动 yield 的话进度条一格都不动。 */
-  const paint=()=>new Promise(r=>requestAnimationFrame(()=>r()));
-  const progress=(msg,cls)=>{
-    const pct=TOT?Math.round(done/TOT*100):0;
-    bar.innerHTML=`<div class="hint"><b>${esc(msg)}</b>
+  /* 让浏览器有机会重绘。注意后台标签页里 requestAnimationFrame 会被节流到
+     每秒一次、甚至完全暂停——导入动辄跑几分钟，用户必然会切走标签页，
+     那时 await rAF 会一直不返回，整个导入就卡死了。页面不可见时本来也没什么
+     可画的，直接不等。 */
+  const paint=()=>document.hidden?Promise.resolve():new Promise(r=>requestAnimationFrame(()=>r()));
+  let phase="", pct=0;
+  const prog=(msg,p2)=>{
+    if(msg!=null)phase=msg; if(p2!=null)pct=Math.max(0,Math.min(100,Math.round(p2)));
+    bar.innerHTML=`<div class="hint"><b>${esc(phase)}</b>
       <div style="margin-top:8px;height:8px;border-radius:4px;background:var(--line);overflow:hidden">
-        <div style="height:100%;width:${pct}%;background:var(--${cls||"info"});transition:width .2s"></div></div>
-      <div style="margin-top:6px;font-variant-numeric:tabular-nums">${done} / ${TOT} 份合同 · ${pct}%${
-        done?` · 已用 ${((Date.now()-t0)/1000).toFixed(0)} 秒`:""}</div></div>`;
+        <div style="height:100%;width:${pct}%;background:var(--info);transition:width .2s"></div></div>
+      <div style="margin-top:6px;font-variant-numeric:tabular-nums">${pct}% · 已用 ${((Date.now()-t0)/1000).toFixed(0)} 秒</div>
+      <div class="muted" style="margin-top:4px">请不要关闭或刷新页面</div></div>`;
   };
-  progress("正在导入，请不要关闭或刷新页面…");
-  await paint();
-  let failedAt=null;
+  const step=async(msg,p2)=>{ prog(msg,p2); await paint() };
+
+  let added=0,updated=0,mats=0,arrN=0,slow=false;
   try{
+    /* ===== 阶段 1：先在本地把所有要写的行算好，一个请求都不发 =====
+       原来是「一份合同一轮：改合同 → 删旧物料 → 写新物料」，385 份合同
+       就是 1155 次串行往返。用户实测每次往返约 5.5 秒，整个导入近两小时。
+       改成先全部算好、再按表批量写，请求数从一千多降到十几个。 */
+    await step("正在整理数据…",2);
+    const exist=new Map(Store.be.all("contracts").map(c=>[c.contract_no,c]));
+    const cRows=[],allMats=[],touched=[],auditRows=[],openings={到货:[],开票:[],付款:[]};
+    /* 期初金额只在没记过的时候补一条，先把「已经有期初记录」的合同摸清楚 */
+    const hasOpening={};
+    for(const [k,type] of [["_arr","到货"],["_inv","开票"],["_paid","付款"]])
+      hasOpening[type]=new Set(Store.be.all(TBL[type]).filter(z=>z.no==="期初导入").map(z=>z.contract_id));
+
     for(const [no,rs] of entries){
-      let o=Store.be.all("contracts").find(c=>c.contract_no===no);
       const head=rs[0], patch={};
       HEAD_FIELDS.forEach(k=>{if(head[k]!=null&&head[k]!=="")patch[k]=DATE_FIELDS.includes(k)?normDate(head[k]):head[k]});
-      /* 物料行先在内存里备好，合同总额也就地算出来，跟合同一起写进去——
-         省掉原来"插完物料再回头 update 一次总额"的那一趟请求，385 份合同少发 385 次。 */
       const mrows=p.isMaterial?rs.filter(r=>r.material_code||r.material_name).map(r=>({contract_id:null,
         line_no:r.line_no||"",material_code:r.material_code||"",material_name:r.material_name||"",
         spec:r.spec||"",unit:r.unit||"",plan_qty:num(r.plan_qty),price_tax_in:num(r.price_tax_in),
         amount_tax_in:num(r.amount_tax_in),brand:r.brand||"",info_code:r.info_code||""})):[];
+      const o=exist.get(no);
       if(head.total_amount)patch.total_amount=num(head.total_amount);
       else if(mrows.length&&!num(o&&o.total_amount))
         patch.total_amount=+mrows.reduce((s,m)=>s+(+m.amount_tax_in||0),0).toFixed(2);
-      if(!o){ o=await Store.be.insert("contracts",Object.assign({contract_no:no,is_void:0,currency:"CNY"},patch)); added++; }
-      else { await Store.be.update("contracts",o.id,patch); updated++; }
-      if(p.isMaterial){
-        await Store.be.removeWhere("materials",m=>m.contract_id===o.id);
-        if(mrows.length){ mrows.forEach(m=>m.contract_id=o.id); await Store.be.insertMany("materials",mrows); mats+=mrows.length; }
-      }
-      /* 期初金额 → 一条汇总记录，后续登记在此基础上累加 */
+      /* 已存在的合同要发「合并后的完整行」：upsert 是整行覆盖，
+         只发改动字段会把其余列打成默认值。 */
+      const row=o?Object.assign({},o,patch)
+                 :Object.assign({id:uid("c"),contract_no:no,is_void:0,currency:"CNY"},patch);
+      if(o)updated++; else added++;
+      cRows.push(row); touched.push(row.id);
+      mrows.forEach(m=>m.contract_id=row.id);
+      allMats.push(...mrows);
       for(const [k,type] of [["_arr","到货"],["_inv","开票"],["_paid","付款"]]){
-        const v=num(head[k]); if(!v)continue;
-        const t=TBL[type];
-        const has=Store.be.all(t).some(z=>z.contract_id===o.id&&z.no==="期初导入");
-        if(!has){ await Store.be.insert(t,{contract_id:o.id,date:head.sign_date?normDate(head.sign_date):iso(TODAY),amount:v,no:"期初导入",remark:"从 Excel 导入的累计金额",by:(ME&&ME.name)||""}); arrN++; }
+        const v=num(head[k]); if(!v||hasOpening[type].has(row.id))continue;
+        openings[type].push({contract_id:row.id,date:head.sign_date?normDate(head.sign_date):iso(TODAY),
+          amount:v,no:"期初导入",remark:"从 Excel 导入的累计金额",by:(ME&&ME.name)||""});
+        arrN++;
       }
-      /* 留痕攒到最后一次性写，同样是省往返 */
-      auditRows.push({contract_id:o.id,at:nowTS(),who:(ME&&ME.name)||"系统",what:"Excel 导入更新"});
-      done++;
-      if(done%5===0||done===TOT){ progress("正在导入，请不要关闭或刷新页面…"); await paint(); }
-      failedAt=null;
+      auditRows.push({contract_id:row.id,at:nowTS(),who:(ME&&ME.name)||"系统",what:"Excel 导入更新"});
     }
+
+    /* ===== 阶段 2：合同 =====
+       批量 upsert 是这次提速的关键，但它用到 PostgREST 的 on_conflict +
+       merge-duplicates，我没能在真实 Supabase 上验证过。万一这条路不通，
+       自动退回逐份写——慢，但保证导得进去，而不是直接失败。 */
+    await step("正在写入 "+TOT+" 份合同…",5);
+    try{
+      await Store.be.upsertMany("contracts",cRows,"contract_no",
+        (d,t)=>prog("正在写入 "+TOT+" 份合同…",5+d/t*35));
+    }catch(e){
+      console.warn("批量写入合同失败，退回逐份写入：",e);
+      slow=true;
+      let i=0;
+      for(const row of cRows){
+        const o=exist.get(row.contract_no);
+        if(o)await Store.be.update("contracts",o.id,row);
+        else await Store.be.insert("contracts",row);
+        if(++i%5===0||i===cRows.length){ prog("批量写入不可用，正在逐份写入（会慢很多）… "+i+" / "+cRows.length,5+i/cRows.length*35); await paint() }
+      }
+    }
+
+    if(p.isMaterial){
+      /* ===== 阶段 3：清掉这些合同的旧物料 ===== */
+      await step("正在清理旧物料…",42);
+      await Store.be.removeByField("materials","contract_id",touched);
+      /* ===== 阶段 4：写入物料 ===== */
+      await step("正在写入 "+allMats.length+" 行物料…",50);
+      if(allMats.length){
+        await Store.be.insertMany("materials",allMats,
+          (d,t)=>prog("正在写入 "+allMats.length+" 行物料…",50+d/t*35));
+        mats=allMats.length;
+      }
+    }
+
+    /* ===== 阶段 5：期初金额 ===== */
+    const opTot=openings.到货.length+openings.开票.length+openings.付款.length;
+    if(opTot){
+      await step("正在写入期初金额…",88);
+      for(const type of ["到货","开票","付款"])
+        if(openings[type].length)await Store.be.insertMany(TBL[type],openings[type]);
+    }
+    /* ===== 阶段 6：留痕 ===== */
+    await step("正在写入操作留痕…",94);
     if(auditRows.length)await Store.be.insertMany("audit",auditRows);
   }catch(err){
-    /* 中途失败必须说清楚做到哪了。已经写进去的那部分是留在库里的，
-       不会自动回滚——但重新导入同一份表会按合同号覆盖，不会产生重复，
-       所以正确的处置就是修好原因后原样再导一次。 */
+    /* 中途失败必须说清楚。已经写进去的那部分留在库里，不会自动回滚——
+       但重新导入同一份表会按合同号覆盖，不会产生重复，所以正确的处置就是
+       修好原因后原样再导一次。 */
     console.error(err);
-    const at=entries[done]?entries[done][0]:"(未知)";
     bar.innerHTML=`<div class="critbox"><b>导入中断了</b><br>
-      已成功处理 <b>${done}</b> / ${TOT} 份合同，卡在第 <b>${done+1}</b> 份（合同号 <code>${esc(at)}</code>）。<br>
-      原因：${esc(err.message||String(err))}<br><br>
-      已经导进去的那 ${done} 份<b>不会丢</b>。修好原因后把同一份表<b>原样再导一次</b>即可——
+      在「${esc(phase)}」这一步出错：${esc(err.message||String(err))}<br><br>
+      已经写进去的部分<b>不会丢</b>。修好原因后把同一份表<b>原样再导一次</b>即可——
       系统按合同号覆盖，已导过的会被更新而不是重复新建。</div>
       <div class="bar"><button class="btn pri" id="doImport">重试导入</button></div>`;
     say("导入中断："+(err.message||"未知错误"));
@@ -753,6 +802,7 @@ async function doImport(){
   bar.innerHTML=`<div class="hint" style="border-left:3px solid var(--ok);padding-left:10px">
     <b>导入完成</b>（用时 ${((Date.now()-t0)/1000).toFixed(0)} 秒）：新增 <b>${added}</b> 份，更新 <b>${updated}</b> 份${
       mats?`，物料 <b>${mats}</b> 行`:""}${arrN?`，期初金额 <b>${arrN}</b> 条`:""}。
+    ${slow?`<div style="color:var(--warn);margin-top:6px">注意：批量写入没走通，这次是逐份写的，所以偏慢。把这条告诉我可以进一步排查。</div>`:""}
     <div style="margin-top:8px">现在库里一共：合同 <b>${allC.length}</b> 份 · 物料 <b>${Store.be.all("materials").length}</b> 行 ·
     合同总额合计 <b>¥${fmt(sumAll)}</b>（${wan(sumAll)}）${zero?` · <span style="color:var(--warn)">其中 ${zero} 份金额为 0</span>`:""}</div>
     <div class="muted" style="margin-top:6px">请拿这几个数跟你的 Excel 核对一遍。</div></div>`;
