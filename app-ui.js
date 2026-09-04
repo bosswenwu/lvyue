@@ -633,41 +633,102 @@ function preview(text){
     <tbody>${p.data.slice(0,6).map(r=>`<tr>${p.keys.filter(Boolean).map(k=>`<td>${esc(r[k])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
     <div class="bar"><button class="btn pri" id="doImport">确认导入</button></div>`;
 }
+/* 导入是整个系统里最慢的操作：云端模式下每份合同都要发好几个请求，
+   385 份合同就是一千多次往返，能跑好几分钟。原来这期间界面完全静止、
+   按钮也不禁用——用户实测反馈"点了没反应"，然后会忍不住再点一次，
+   于是两次导入并发跑，互相删掉对方刚插入的物料行，数据直接错乱。
+   所以这里三件事一起做：加重入锁、显示进度、结束时给出能对账的数字。 */
+let IMPORTING=false;
 async function doImport(){
   if(!PENDING)return;
+  if(IMPORTING){ say("正在导入中，请勿重复点击"); return }
   const p=PENDING,byNo={};
   p.data.forEach(r=>{(byNo[r.contract_no]=byNo[r.contract_no]||[]).push(r)});
-  let added=0,updated=0,mats=0,arrN=0;
-  for(const [no,rs] of Object.entries(byNo)){
-    let o=Store.be.all("contracts").find(c=>c.contract_no===no);
-    const head=rs[0], patch={};
-    HEAD_FIELDS.forEach(k=>{if(head[k]!=null&&head[k]!=="")patch[k]=DATE_FIELDS.includes(k)?normDate(head[k]):head[k]});
-    if(head.total_amount)patch.total_amount=num(head.total_amount);
-    if(!o){ o=await Store.be.insert("contracts",Object.assign({contract_no:no,is_void:0,currency:"CNY"},patch)); added++; }
-    else { await Store.be.update("contracts",o.id,patch); updated++; }
-    if(p.isMaterial){
-      await Store.be.removeWhere("materials",m=>m.contract_id===o.id);
-      /* 攒成数组一次批量插入，而不是一行一个请求——几千行物料时快一两个数量级 */
-      const mrows=rs.filter(r=>r.material_code||r.material_name).map(r=>({contract_id:o.id,line_no:r.line_no||"",material_code:r.material_code||"",
-        material_name:r.material_name||"",spec:r.spec||"",unit:r.unit||"",plan_qty:num(r.plan_qty),
-        price_tax_in:num(r.price_tax_in),amount_tax_in:num(r.amount_tax_in),brand:r.brand||"",info_code:r.info_code||""}));
-      if(mrows.length){ await Store.be.insertMany("materials",mrows); mats+=mrows.length; }
-      if(!num(o.total_amount)){
-        const sum=Store.be.all("materials").filter(m=>m.contract_id===o.id).reduce((s,m)=>s+(+m.amount_tax_in||0),0);
-        await Store.be.update("contracts",o.id,{total_amount:sum});
+  const entries=Object.entries(byNo), TOT=entries.length;
+  IMPORTING=true;
+  const btn=$("#doImport"); if(btn){btn.disabled=true;btn.textContent="导入中…"}
+  const bar=$("#importPreview");
+  const t0=Date.now();
+  let added=0,updated=0,mats=0,arrN=0,done=0;
+  const auditRows=[];
+  /* 让浏览器有机会重绘。云端模式每次 await fetch 本来就会让出，
+     但本机模式（IndexedDB）快到根本不让出，不主动 yield 的话进度条一格都不动。 */
+  const paint=()=>new Promise(r=>requestAnimationFrame(()=>r()));
+  const progress=(msg,cls)=>{
+    const pct=TOT?Math.round(done/TOT*100):0;
+    bar.innerHTML=`<div class="hint"><b>${esc(msg)}</b>
+      <div style="margin-top:8px;height:8px;border-radius:4px;background:var(--line);overflow:hidden">
+        <div style="height:100%;width:${pct}%;background:var(--${cls||"info"});transition:width .2s"></div></div>
+      <div style="margin-top:6px;font-variant-numeric:tabular-nums">${done} / ${TOT} 份合同 · ${pct}%${
+        done?` · 已用 ${((Date.now()-t0)/1000).toFixed(0)} 秒`:""}</div></div>`;
+  };
+  progress("正在导入，请不要关闭或刷新页面…");
+  await paint();
+  let failedAt=null;
+  try{
+    for(const [no,rs] of entries){
+      let o=Store.be.all("contracts").find(c=>c.contract_no===no);
+      const head=rs[0], patch={};
+      HEAD_FIELDS.forEach(k=>{if(head[k]!=null&&head[k]!=="")patch[k]=DATE_FIELDS.includes(k)?normDate(head[k]):head[k]});
+      /* 物料行先在内存里备好，合同总额也就地算出来，跟合同一起写进去——
+         省掉原来"插完物料再回头 update 一次总额"的那一趟请求，385 份合同少发 385 次。 */
+      const mrows=p.isMaterial?rs.filter(r=>r.material_code||r.material_name).map(r=>({contract_id:null,
+        line_no:r.line_no||"",material_code:r.material_code||"",material_name:r.material_name||"",
+        spec:r.spec||"",unit:r.unit||"",plan_qty:num(r.plan_qty),price_tax_in:num(r.price_tax_in),
+        amount_tax_in:num(r.amount_tax_in),brand:r.brand||"",info_code:r.info_code||""})):[];
+      if(head.total_amount)patch.total_amount=num(head.total_amount);
+      else if(mrows.length&&!num(o&&o.total_amount))
+        patch.total_amount=+mrows.reduce((s,m)=>s+(+m.amount_tax_in||0),0).toFixed(2);
+      if(!o){ o=await Store.be.insert("contracts",Object.assign({contract_no:no,is_void:0,currency:"CNY"},patch)); added++; }
+      else { await Store.be.update("contracts",o.id,patch); updated++; }
+      if(p.isMaterial){
+        await Store.be.removeWhere("materials",m=>m.contract_id===o.id);
+        if(mrows.length){ mrows.forEach(m=>m.contract_id=o.id); await Store.be.insertMany("materials",mrows); mats+=mrows.length; }
       }
+      /* 期初金额 → 一条汇总记录，后续登记在此基础上累加 */
+      for(const [k,type] of [["_arr","到货"],["_inv","开票"],["_paid","付款"]]){
+        const v=num(head[k]); if(!v)continue;
+        const t=TBL[type];
+        const has=Store.be.all(t).some(z=>z.contract_id===o.id&&z.no==="期初导入");
+        if(!has){ await Store.be.insert(t,{contract_id:o.id,date:head.sign_date?normDate(head.sign_date):iso(TODAY),amount:v,no:"期初导入",remark:"从 Excel 导入的累计金额",by:(ME&&ME.name)||""}); arrN++; }
+      }
+      /* 留痕攒到最后一次性写，同样是省往返 */
+      auditRows.push({contract_id:o.id,at:nowTS(),who:(ME&&ME.name)||"系统",what:"Excel 导入更新"});
+      done++;
+      if(done%5===0||done===TOT){ progress("正在导入，请不要关闭或刷新页面…"); await paint(); }
+      failedAt=null;
     }
-    /* 期初金额 → 一条汇总记录，后续登记在此基础上累加 */
-    for(const [k,type] of [["_arr","到货"],["_inv","开票"],["_paid","付款"]]){
-      const v=num(head[k]); if(!v)continue;
-      const t=TBL[type];
-      const has=Store.be.all(t).some(z=>z.contract_id===o.id&&z.no==="期初导入");
-      if(!has){ await Store.be.insert(t,{contract_id:o.id,date:head.sign_date?normDate(head.sign_date):iso(TODAY),amount:v,no:"期初导入",remark:"从 Excel 导入的累计金额",by:(ME&&ME.name)||""}); arrN++; }
-    }
-    await logIt(o.id,"Excel 导入更新");
+    if(auditRows.length)await Store.be.insertMany("audit",auditRows);
+  }catch(err){
+    /* 中途失败必须说清楚做到哪了。已经写进去的那部分是留在库里的，
+       不会自动回滚——但重新导入同一份表会按合同号覆盖，不会产生重复，
+       所以正确的处置就是修好原因后原样再导一次。 */
+    console.error(err);
+    const at=entries[done]?entries[done][0]:"(未知)";
+    bar.innerHTML=`<div class="critbox"><b>导入中断了</b><br>
+      已成功处理 <b>${done}</b> / ${TOT} 份合同，卡在第 <b>${done+1}</b> 份（合同号 <code>${esc(at)}</code>）。<br>
+      原因：${esc(err.message||String(err))}<br><br>
+      已经导进去的那 ${done} 份<b>不会丢</b>。修好原因后把同一份表<b>原样再导一次</b>即可——
+      系统按合同号覆盖，已导过的会被更新而不是重复新建。</div>
+      <div class="bar"><button class="btn pri" id="doImport">重试导入</button></div>`;
+    say("导入中断："+(err.message||"未知错误"));
+    IMPORTING=false; if(btn){btn.disabled=false;btn.textContent="确认导入"}
+    reload();renderData();
+    return;
   }
-  $("#importPreview").innerHTML=`<div class="hint">导入完成：新增 <b>${added}</b> 份，更新 <b>${updated}</b> 份${mats?`，物料 <b>${mats}</b> 行`:""}${arrN?`，期初金额 <b>${arrN}</b> 条`:""}。</div>`;
-  $("#pasteBox").value="";PENDING=null;reload();renderData();say("导入完成");
+  IMPORTING=false;
+  /* 给出能直接跟 Excel 对账的数字，而不只是"导入完成"四个字 */
+  reload();
+  const allC=Store.be.all("contracts").filter(c=>!c.is_void);
+  const sumAll=allC.reduce((s,c)=>s+(+c.total_amount||0),0);
+  const zero=allC.filter(c=>!(+c.total_amount)).length;
+  bar.innerHTML=`<div class="hint" style="border-left:3px solid var(--ok);padding-left:10px">
+    <b>导入完成</b>（用时 ${((Date.now()-t0)/1000).toFixed(0)} 秒）：新增 <b>${added}</b> 份，更新 <b>${updated}</b> 份${
+      mats?`，物料 <b>${mats}</b> 行`:""}${arrN?`，期初金额 <b>${arrN}</b> 条`:""}。
+    <div style="margin-top:8px">现在库里一共：合同 <b>${allC.length}</b> 份 · 物料 <b>${Store.be.all("materials").length}</b> 行 ·
+    合同总额合计 <b>¥${fmt(sumAll)}</b>（${wan(sumAll)}）${zero?` · <span style="color:var(--warn)">其中 ${zero} 份金额为 0</span>`:""}</div>
+    <div class="muted" style="margin-top:6px">请拿这几个数跟你的 Excel 核对一遍。</div></div>`;
+  $("#pasteBox").value="";PENDING=null;renderData();say("导入完成");
 }
 /* ---------- 批量上传附件：按文件名里的合同号自动归档 ---------- */
 let BULK=null;   // [{file, contractId|null, reason}]
