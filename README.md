@@ -60,7 +60,22 @@ git push -u origin main
 
 > **公开注册必须关掉。** 本仓库是公开的，代码里写着 Supabase 地址和 publishable key；而数据表的 RLS 是「任何登录用户可读写全部数据」。两者相加，只要 Supabase 的公开注册开着，**任何人都能自己注册一个账号，登进来看到全部合同、金额和供应商**。到 Authentication → Sign In / Providers → Email 把 **Allow new users to sign up** 关掉。
 >
-> 关掉之后，「用户管理 → 新建账号」这个按钮就用不了了（它走的正是公开注册接口）。给同事开号改到 **Authentication → Users → Add user**，勾上 **Auto Confirm User**，把邮箱和密码发给对方。新账号默认是「成员」，要升管理员在系统的「用户管理」页点「设为管理员」。
+> 关掉之后，「用户管理 → 新建账号」需要部署一个 Edge Function 才能用（见下）。没部署的话，给同事开号就到 **Authentication → Users → Add user**，勾上 **Auto Confirm User**，把邮箱和密码发给对方。新账号默认是「成员」，要升管理员在系统的「用户管理」页点「设为管理员」。
+
+### 部署建号函数（一次性，五分钟，不用装 CLI）
+
+关掉公开注册后，前端就没法自己建号了——真正建号需要 `service_role` 密钥，而它**绝对不能出现在前端代码里**（那等于把整个数据库的钥匙公开）。所以建号挪到服务端函数里：`service_role` 只存在于函数的环境变量中，浏览器拿不到。
+
+1. Supabase 控制台 → **Edge Functions** → **Deploy a new function**
+2. 函数名填 **`admin-create-user`**（必须一字不差，前端按这个名字调用）
+3. 把仓库里 `supabase/functions/admin-create-user/index.ts` 的内容整个粘进去
+4. 点 **Deploy**
+
+`SUPABASE_URL` 和 `SUPABASE_SERVICE_ROLE_KEY` 由平台自动注入，不用手工配。
+
+部署后回系统「用户管理 → 新建账号」就恢复了：填邮箱和姓名，系统生成 12 位随机密码，只显示一次。函数内部会先用调用者的令牌确认他确实是**管理员**才放行——普通成员点了会被拒绝。
+
+没部署也不会报一句看不懂的话，按钮会直接告诉你上面这两条路怎么走。
 
 **云端模式下账号就是邮箱**，不再是随便起的用户名——这是 Supabase 账号系统的硬性要求。填一个真实存在的邮箱域名即可（如 `zhangsan@qq.com`、`@163.com`、`@gmail.com`），不需要对方真能收到信（第 3 步已经关掉确认邮件）。
 
@@ -114,6 +129,7 @@ git push -u origin main
 | `app-core.js` | 数据层：本机/云端两套后端、业务计算、导入解析 |
 | `app-ui.js` | 界面逻辑 |
 | `schema.sql` | Supabase 建表脚本 |
+| `supabase/functions/admin-create-user/` | 管理员建号的 Edge Function（关掉公开注册后靠它） |
 | `启动.bat` | 本机启动脚本 |
 | `core-test.html` / `e2e.html` | 自动化测试，浏览器打开即运行 |
 
