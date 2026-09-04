@@ -173,16 +173,33 @@ function renderHome(){
   drawCash();
 }
 const cssv=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+/* 12 周应付分桶。
+   注意这里天然会漏掉三类钱：没有到期日的付款节点、到期日超出 12 周的节点、
+   以及既没有付款节点又没有交期因而无从估算的合同。原来这三类都是静默丢弃，
+   图上完全看不出来——现金流预测少算钱却不吭声，是这个功能最危险的失败方式。
+   实测：合同没有交期时，「批量生成付款节点」产出的节点 100% 没有到期日，
+   于是整张图是空的，而页面上没有任何解释。
+   现在把漏掉的金额挂在返回的数组上（数组也是对象，B[i] / reduce / 展开都不受
+   影响），由 drawCash() 在图下方明写出来。 */
 function cashBuckets(weeks){
   const b=new Array(weeks).fill(0);
+  b.undated=0;    // 有付款节点，但节点没有到期日
+  b.beyond=0;     // 到期日超出预测窗口
+  b.noBasis=0;    // 既没有付款节点、又没有交期，无从估算
   VIEWDATA.filter(x=>!x.o.is_void).forEach(({o,c,pls})=>{
     if(pls.length){
       pls.filter(p=>!p.paid).forEach(p=>{
+        const amt=+p.amount||0;
         const dd=d(p.due_date); const g=dd?days(dd,TODAY):null;
-        if(g===null)return; const i=g<0?0:Math.floor(g/7); if(i<weeks)b[i]+=(+p.amount||0);
+        if(g===null){ b.undated+=amt; return }
+        const i=g<0?0:Math.floor(g/7);
+        if(i<weeks)b[i]+=amt; else b.beyond+=amt;
       });
     } else if(c.owe>0&&c.dueDate){
-      const g=days(c.dueDate,TODAY),i=g<0?0:Math.floor(g/7); if(i<weeks)b[i]+=c.owe;
+      const g=days(c.dueDate,TODAY),i=g<0?0:Math.floor(g/7);
+      if(i<weeks)b[i]+=c.owe; else b.beyond+=c.owe;
+    } else if(c.owe>0){
+      b.noBasis+=c.owe;
     }
   });
   return b;
@@ -192,6 +209,17 @@ function drawCash(){
   const c=cv.getContext("2d"),w=cv.width=cv.offsetWidth*2,h=cv.height=300,p=38;
   c.clearRect(0,0,w,h);
   const B=cashBuckets(12),mx=Math.max(...B,1),bw=(w-p*2)/12;
+  /* 图下方明写有多少钱没进这张图，以及为什么 */
+  const note=$("#cashNote");
+  if(note){
+    const bits=[];
+    if(B.undated>0)bits.push(`<b>¥${wan(B.undated)}</b> 的付款节点没有到期日（合同缺交期时生成的节点都会这样）`);
+    if(B.noBasis>0)bits.push(`<b>¥${wan(B.noBasis)}</b> 的待付款既没有付款节点也没有交期，无从估算`);
+    if(B.beyond>0)bits.push(`<b>¥${wan(B.beyond)}</b> 到期日在 12 周以后`);
+    note.innerHTML=bits.length
+      ?`<div class="critbox" style="margin-top:10px;font-size:12px">这张图没有算进：${bits.join("；")}。<br>
+         补上交期后重新生成付款节点即可纳入预测。</div>`:"";
+  }
   c.strokeStyle=cssv("--line");c.lineWidth=2;
   [0,.5,1].forEach(f=>{const y=h-p-f*(h-p*1.75);c.beginPath();c.moveTo(p,y);c.lineTo(w-p,y);c.stroke()});
   c.font="17px "+cssv("--font-mono");c.textAlign="center";

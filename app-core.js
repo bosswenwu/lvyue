@@ -15,7 +15,16 @@ const fmt=n=>(+n||0).toLocaleString("zh-CN",{minimumFractionDigits:2,maximumFrac
 const wan=n=>Math.abs(+n||0)>=1e4?((+n)/1e4).toFixed(1)+"万":fmt(n);
 const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const num=v=>{if(v==null||v==="")return 0;const n=parseFloat(String(v).replace(/[,，\s¥$€]/g,""));return isNaN(n)?0:n};
-const uid=p=>(p||"r")+Date.now().toString(36)+Math.floor(Math.random()*1e6).toString(36);
+/* id 生成器。随机部分只有 100 万种取值，而批量写入时一整批 id 是在同一个
+   同步循环里生成的——Date.now() 完全相同，于是只剩那 100 万种可选。按生日
+   问题算，一批 138 行就有约 1% 撞车、385 行约 7%。数据库里 id 是主键，一撞
+   整批 INSERT 就被拒，导入直接中断。
+   实测用户那份 2798 行的表，一次云端导入约 11.4% 的概率会炸在主键重复上。
+   本机模式（IndexedDB）不校验唯一性，所以本地测试永远发现不了，只在云端炸。
+   加一个单调递增的会话内计数器：同一个会话里绝无可能重复；跨会话跨设备仍靠
+   时间戳加随机数，两台机器要在同一毫秒、同一随机数、同一序号上同时撞才可能。 */
+let _uidSeq=0;
+const uid=p=>(p||"r")+Date.now().toString(36)+(_uidSeq++).toString(36)+Math.floor(Math.random()*1e6).toString(36);
 const nowTS=()=>{const n=new Date();return iso(n)+" "+String(n.getHours()).padStart(2,"0")+":"+String(n.getMinutes()).padStart(2,"0")};
 function normDate(v){
   if(v==null)return "";
@@ -449,7 +458,13 @@ function genPlan(o,c){
     matched=true; const k=m[1],r=(+m[2])/100;
     if(/预付|定金/.test(k)) push("预付款",r,o.sign_date||"");
     else if(/发货/.test(k)) push("发货款",r,o.shipment_notice_date||due);
-    else if(/货到|验收/.test(k)) push("到货款",r,due);
+    /* 验收要跟到货分开。原来两者都叫「到货款」，于是「预付30%，货到付30%，
+       验收付30%，质保付10%」会生成两个同名同到期日的「到货款」节点，登记
+       付款时根本分不清哪个是哪个。用户表里有 9 份合同是这种写法。
+       到期日暂时仍按交期——验收通常晚于到货，但晚多少是业务口径，
+       代码不该替人假定，先把名字分开，日期可以在付款计划页手工改。 */
+    else if(/验收/.test(k)) push("验收款",r,due);
+    else if(/货到/.test(k)) push("到货款",r,due);
     else if(/质保/.test(k)) push("质保金",r,due?addDays(due,365):"");
     else push("尾款",r,due);
   }
