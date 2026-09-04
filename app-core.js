@@ -94,6 +94,20 @@ const LocalBackend={
   },
   async remove(t,id){ this.data[t]=this.data[t].filter(x=>x.id!==id); await this.flush() },
   async removeWhere(t,fn){ this.data[t]=this.data[t].filter(x=>!fn(x)); await this.flush() },
+  async removeByField(t,field,values){ const set=new Set(values); this.data[t]=this.data[t].filter(x=>!set.has(x[field])); await this.flush() },
+  /* 按唯一键合并写入。本机模式没有唯一约束，自己按 key 找一遍。 */
+  async upsertMany(t,rows,onConflict){
+    if(!rows||!rows.length)return [];
+    const key=onConflict||"id";
+    const idx=new Map(this.data[t].map((r,i)=>[r[key],i]));
+    for(const row of rows){
+      row.id=row.id||uid(t[0]);
+      const i=idx.get(row[key]);
+      if(i==null){ idx.set(row[key],this.data[t].length); this.data[t].push(row) }
+      else Object.assign(this.data[t][i],row);
+    }
+    await this.flush(); return rows;
+  },
   async replaceAll(next){ this.data=next; await this.flush() },
   async putFile(id,blobData){ await IDB.put("files",id,blobData) },
   async getFile(id){ return await IDB.get("files",id) },
@@ -370,7 +384,7 @@ const CloudBackend={
   },
   /* 批量插入：一次 POST 一个数组（PostgREST 原生支持），500 一批避免请求体过大。
      导入几千行物料时，从"一行一个请求"降到十几个请求，快一两个数量级。 */
-  async insertMany(t,rows){
+  async insertMany(t,rows,onBatch){
     if(!rows||!rows.length)return [];
     rows.forEach(r=>{r.id=r.id||uid(t[0])});
     const out=[];
@@ -379,8 +393,50 @@ const CloudBackend={
       const r=await this.rest(t,{method:"POST",headers:{Prefer:"return=representation"},body:JSON.stringify(batch)});
       const saved=(r&&r.length)?r:batch;
       saved.forEach(x=>this.data[t].push(x)); out.push(...saved);
+      if(onBatch)onBatch(Math.min(i+500,rows.length),rows.length);
     }
     return out;
+  },
+  /* 按唯一键批量合并写入（PostgREST 的 upsert）。
+     导入时几百份合同大多是「已存在、要更新」，而 PATCH 一次只能改一行，
+     于是 385 份合同就是 385 次串行往返。用户实测每次往返约 5.5 秒，
+     整个导入要跑近两小时。改成 on_conflict + merge-duplicates 之后，
+     500 份合同一个请求就写完。
+     关键：必须发「合并后的完整行」。merge-duplicates 是整行覆盖，只发改动的
+     字段会把其余列打成默认值。内存里的行本来就是 select=* 取回来的完整行，
+     在它上面合并 patch 再发回去，任何列都不会丢——包括后来加的 version。 */
+  async upsertMany(t,rows,onConflict,onBatch){
+    if(!rows||!rows.length)return [];
+    rows.forEach(r=>{r.id=r.id||uid(t[0])});
+    const q=onConflict?("?on_conflict="+encodeURIComponent(onConflict)):"";
+    for(let i=0;i<rows.length;i+=500){
+      const batch=rows.slice(i,i+500);
+      await this.rest(t+q,{method:"POST",
+        headers:{Prefer:"resolution=merge-duplicates,return=minimal"},
+        body:JSON.stringify(batch)});
+      if(onBatch)onBatch(Math.min(i+500,rows.length),rows.length);
+    }
+    /* 同步内存副本 */
+    const key=onConflict||"id";
+    const idx=new Map(this.data[t].map((r,i)=>[r[key],i]));
+    for(const row of rows){
+      const i=idx.get(row[key]);
+      if(i==null){ idx.set(row[key],this.data[t].length); this.data[t].push(row) }
+      else Object.assign(this.data[t][i],row);
+    }
+    return rows;
+  },
+  /* 按某个字段的一批取值删除。导入时要清掉几百份合同的旧物料——
+     逐份合同发一个 DELETE 是几百次往返，按 contract_id 批量删只要几次。 */
+  async removeByField(t,field,values){
+    const vals=[...new Set(values)].filter(v=>v!=null);
+    if(!vals.length)return;
+    for(let i=0;i<vals.length;i+=100){
+      const list=vals.slice(i,i+100).map(x=>encodeURIComponent('"'+String(x).replace(/"/g,'\\"')+'"')).join(",");
+      await this.rest(t+"?"+field+"=in.("+list+")",{method:"DELETE"});
+    }
+    const set=new Set(vals);
+    this.data[t]=this.data[t].filter(x=>!set.has(x[field]));
   },
   async update(t,id,patch){
     await this.rest(t+"?id=eq."+encodeURIComponent(id),{method:"PATCH",body:JSON.stringify(patch)});
