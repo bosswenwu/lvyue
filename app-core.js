@@ -135,7 +135,7 @@ const DEFAULT_CLOUD_CFG={
   key:"sb_publishable_j81sdF6Rd1lW_QVf_dZ1Kw_BSlYtA3N"
 };
 const CloudBackend={
-  kind:"cloud", url:null, key:null, token:null, user:null, data:null,
+  kind:"cloud", url:null, key:null, token:null, refresh:null, expAt:0, user:null, data:null, _refreshing:null,
   cfg(){
     /* forceLocal 是显式"我就要本机模式"的标记（数据管理页「断开，改回本机」按钮写入）。
        光是删掉本地覆盖值不够——那样会落回下面的默认云端配置，等于点了没用。 */
@@ -161,11 +161,59 @@ const CloudBackend={
     const sess=(()=>{try{return JSON.parse(localStorage.getItem("lvyue_sess")||"null")}catch(e){return null}})();
     /* 会话是绑定「哪个项目 + 哪把密钥」的。配置换过之后还留着旧 token，
        只会在后面每一个请求上拿 401，不如在这里就丢掉，干脆退回登录页重登一次。 */
-    if(sess&&sess.token&&sess.stamp===this.stamp()){ this.token=sess.token; this.user=sess.user; }
+    if(sess&&sess.token&&sess.stamp===this.stamp()){
+      this.token=sess.token; this.user=sess.user;
+      this.refresh=sess.refresh||null; this.expAt=+sess.expAt||0;
+    }
     else if(sess) localStorage.removeItem("lvyue_sess");
     return this;
   },
   stamp(){ return this.url+"|"+this.key },
+  persist(){ localStorage.setItem("lvyue_sess",JSON.stringify({token:this.token,refresh:this.refresh,expAt:this.expAt,user:this.user,stamp:this.stamp()})) },
+  /* ---------- 会话续期 ----------
+     Supabase 的 access token 默认 1 小时过期。原来只存 access_token、
+     把 refresh_token 丢掉了，于是页面开过一小时，任何写操作都拿 401，
+     提示「登录已过期，请重新登录」——正在导入的话会断在一半。
+     现在存下 refresh_token 和过期时刻：请求前若快到期就先续期，万一还是
+     拿了 401 就续期一次再重放这次请求。
+     refresh_token 在 Supabase 是一次性的（用一次就换新的），所以并发请求
+     必须共用同一个续期 Promise，否则几个请求各自拿同一个 refresh_token 去
+     续期，后到的会因为凭证已被作废而失败，把人踢回登录页。 */
+  setSession(j){
+    this.token=j.access_token;
+    if(j.refresh_token)this.refresh=j.refresh_token;
+    this.expAt=Date.now()+((+j.expires_in||3600)*1000);
+    this.persist();
+  },
+  async refreshSession(){
+    if(this._refreshing)return this._refreshing;            // 并发共用同一次续期
+    if(!this.refresh)throw new Error("没有可用的续期凭证");
+    this._refreshing=(async()=>{
+      const r=await fetch(this.url+"/auth/v1/token?grant_type=refresh_token",{method:"POST",
+        headers:{apikey:this.key,"Content-Type":"application/json"},
+        body:JSON.stringify({refresh_token:this.refresh})});
+      if(!r.ok){ this.logout(); throw new Error("会话已过期且无法自动续期，请重新登录") }
+      const j=await r.json(); this.setSession(j); return j;
+    })();
+    try{ return await this._refreshing } finally{ this._refreshing=null }
+  },
+  /* 提前 60 秒续期，避免请求正好卡在过期那一瞬间 */
+  async ensureFresh(){
+    if(!this.token||!this.refresh||!this.expAt)return;
+    if(Date.now()>this.expAt-60000){ try{ await this.refreshSession() }catch(e){} }
+  },
+  /* 带鉴权的 fetch：先保证令牌新鲜，拿到 401 再续期一次并重放。
+     附件走 Storage 接口、不经过 rest()，所以单独抽出来两边共用。 */
+  async authFetch(url,opt){
+    await this.ensureFresh();
+    const build=()=>Object.assign({},opt,{headers:Object.assign({apikey:this.key},(opt&&opt.headers)||{},
+      this.token?{Authorization:"Bearer "+this.token}:{})});
+    let r=await fetch(url,build());
+    if(r.status===401&&this.refresh){
+      try{ await this.refreshSession(); r=await fetch(url,build()); }catch(e){}
+    }
+    return r;
+  },
   head(extra){
     const h={apikey:this.key,"Content-Type":"application/json"};
     if(this.token)h.Authorization="Bearer "+this.token;
@@ -178,7 +226,13 @@ const CloudBackend={
        （目前只有 insert）都会因缺 apikey 被 Supabase 拒绝。 */
     opt=opt||{};
     const {headers:extraHeaders,...restOpt}=opt;
-    const r=await fetch(this.url+"/rest/v1/"+path,Object.assign({headers:this.head(extraHeaders)},restOpt));
+    await this.ensureFresh();
+    const go=()=>fetch(this.url+"/rest/v1/"+path,Object.assign({headers:this.head(extraHeaders)},restOpt));
+    let r=await go();
+    /* 令牌过期了就自动续一次再重放，而不是把人踢回登录页 */
+    if(r.status===401&&this.refresh){
+      try{ await this.refreshSession(); r=await go(); }catch(e){}
+    }
     if(r.status===401){ throw new Error("登录已过期，请重新登录 ["+(await r.text()).slice(0,200)+"]") }
     if(!r.ok) throw new Error("接口错误 "+r.status+"："+(await r.text()).slice(0,180));
     const txt=await r.text(); return txt?JSON.parse(txt):null;
@@ -218,7 +272,7 @@ const CloudBackend={
       throw new Error("登录失败（HTTP "+r.status+"）"+(raw||"｜服务器没有返回具体原因"));
     }
     const j=await r.json();
-    this.token=j.access_token;
+    this.setSession(j);
     const meta=j.user.user_metadata||{};
     /* role 绝不从这里的 metadata 取——那是登录时客户端自己传的，任何人都能伪造。
        真正的角色权威来源是数据库里的 profiles 表，见 fetchProfile()。 */
@@ -244,7 +298,7 @@ const CloudBackend={
       if(/已被管理员停用/.test(e.message)) throw e; // 停用是真错误，必须拦下
       console.warn("profiles 表还不可用（可能没跑 schema_v2_roles.sql），暂时按「成员」处理：",e.message);
     }
-    localStorage.setItem("lvyue_sess",JSON.stringify({token:this.token,user:this.user,stamp:this.stamp()}));
+    this.persist();
     return this.user;
   },
   async setUserRole(targetId,newRole,newDisabled){
@@ -254,7 +308,7 @@ const CloudBackend={
   async setUserName(targetId,name){
     await this.rest("rpc/set_user_name",{method:"POST",body:JSON.stringify({target_id:targetId,new_name:name})});
   },
-  logout(){ this.token=null; this.user=null; localStorage.removeItem("lvyue_sess") },
+  logout(){ this.token=null; this.refresh=null; this.expAt=0; this.user=null; localStorage.removeItem("lvyue_sess") },
   /* 用 anon key 的 signUp 建号：管理员点一下就生成账号+随机密码。
      email 必须是真实可达的邮箱域名（不必是本人常用邮箱，但域名要存在）。
      新账号一律从「成员」开始——role 字段即使传了也会被数据库触发器忽略，
@@ -383,19 +437,19 @@ const CloudBackend={
   async putFile(id,dataUrl){
     const blob=await (await fetch(dataUrl)).blob();
     /* x-upsert 让同一个 id 重传时覆盖而不是报 409（重试、修正上传都会碰到） */
-    const r=await fetch(this.url+"/storage/v1/object/attachments/"+id,{method:"POST",
-      headers:{apikey:this.key,Authorization:"Bearer "+this.token,"x-upsert":"true"},body:blob});
+    const r=await this.authFetch(this.url+"/storage/v1/object/attachments/"+id,{method:"POST",
+      headers:{"x-upsert":"true"},body:blob});
     if(!r.ok)throw new Error("附件上传失败："+(await r.text()).slice(0,140));
   },
   async getFile(id){
-    const r=await fetch(this.url+"/storage/v1/object/attachments/"+id,{headers:{apikey:this.key,Authorization:"Bearer "+this.token}});
+    const r=await this.authFetch(this.url+"/storage/v1/object/attachments/"+id,{});
     if(!r.ok)return null;
     /* 必须读 r 自己的响应体。之前这里读的是一个新建的空 Blob，
        导致云端模式下载下来的附件全是 0 字节。 */
     const blob=await r.blob();
     return await new Promise((ok,no)=>{const fr=new FileReader();fr.onload=()=>ok(fr.result);fr.onerror=()=>no(new Error("附件读取失败"));fr.readAsDataURL(blob)});
   },
-  async delFile(id){ await fetch(this.url+"/storage/v1/object/attachments/"+id,{method:"DELETE",headers:{apikey:this.key,Authorization:"Bearer "+this.token}}) }
+  async delFile(id){ await this.authFetch(this.url+"/storage/v1/object/attachments/"+id,{method:"DELETE"}) }
 };
 
 /* ============================================================
@@ -461,9 +515,10 @@ function genPlan(o,c){
     /* 验收要跟到货分开。原来两者都叫「到货款」，于是「预付30%，货到付30%，
        验收付30%，质保付10%」会生成两个同名同到期日的「到货款」节点，登记
        付款时根本分不清哪个是哪个。用户表里有 9 份合同是这种写法。
-       到期日暂时仍按交期——验收通常晚于到货，但晚多少是业务口径，
-       代码不该替人假定，先把名字分开，日期可以在付款计划页手工改。 */
-    else if(/验收/.test(k)) push("验收款",r,due);
+       到期日按「交期 + 30 天」：验收总在到货之后，跟到货同一天到期是不对的，
+       会把验收款提前压进现金流预测。30 天是通用默认值，具体天数各家不同，
+       可以在付款计划页按合同手工改。 */
+    else if(/验收/.test(k)) push("验收款",r,due?addDays(due,30):"");
     else if(/货到/.test(k)) push("到货款",r,due);
     else if(/质保/.test(k)) push("质保金",r,due?addDays(due,365):"");
     else push("尾款",r,due);
