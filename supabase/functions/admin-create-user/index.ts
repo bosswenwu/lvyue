@@ -48,6 +48,11 @@ Deno.serve(async (req: Request) => {
 
   const URL_ = Deno.env.get("SUPABASE_URL");
   const SRK = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
+  /* 验证「调用者是谁」用 anon key 配上他自己的 Bearer 令牌——这是 Supabase 的
+     标准配对写法。别拿 service_role 当 apikey 去问：那个组合非常规，行为不好预期，
+     而这一步是整个函数的安全起点，不该建立在没把握的写法上。
+     anon key 平台同样自动注入；万一取不到就退回 SRK，至少不会整个函数不可用。 */
+  const ANON = Deno.env.get("SUPABASE_ANON_KEY") || SRK;
   if (!URL_ || !SRK) return json({ error: "函数环境变量缺失，请重新部署" }, 500);
 
   const auth = req.headers.get("Authorization") || "";
@@ -55,7 +60,7 @@ Deno.serve(async (req: Request) => {
 
   /* 1. 用调用者的令牌换出他是谁。令牌伪造或过期在这一步就会被 Supabase 拒掉。 */
   const meRes = await fetch(`${URL_}/auth/v1/user`, {
-    headers: { apikey: SRK, Authorization: auth },
+    headers: { apikey: ANON, Authorization: auth },
   });
   if (!meRes.ok) return json({ error: "登录已过期，请重新登录后再试" }, 401);
   const me = await meRes.json();
