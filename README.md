@@ -58,6 +58,10 @@ git push -u origin main
 
 ### 账号怎么发给同事
 
+> **公开注册必须关掉。** 本仓库是公开的，代码里写着 Supabase 地址和 publishable key；而数据表的 RLS 是「任何登录用户可读写全部数据」。两者相加，只要 Supabase 的公开注册开着，**任何人都能自己注册一个账号，登进来看到全部合同、金额和供应商**。到 Authentication → Sign In / Providers → Email 把 **Allow new users to sign up** 关掉。
+>
+> 关掉之后，「用户管理 → 新建账号」这个按钮就用不了了（它走的正是公开注册接口）。给同事开号改到 **Authentication → Users → Add user**，勾上 **Auto Confirm User**，把邮箱和密码发给对方。新账号默认是「成员」，要升管理员在系统的「用户管理」页点「设为管理员」。
+
 **云端模式下账号就是邮箱**，不再是随便起的用户名——这是 Supabase 账号系统的硬性要求。填一个真实存在的邮箱域名即可（如 `zhangsan@qq.com`、`@163.com`、`@gmail.com`），不需要对方真能收到信（第 3 步已经关掉确认邮件）。
 
 「用户管理 → 新建账号」→ 填邮箱和姓名 → 系统生成 12 位随机密码（去掉了容易看错的 `0O1lI`）→ **只显示一次**，点「复制账号密码」发给对方。
