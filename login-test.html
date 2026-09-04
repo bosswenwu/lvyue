@@ -63,6 +63,80 @@ const vis=(w,sel)=>{const el=w.document.querySelector(sel);if(!el)return false;c
   w.LY.go("list");
   ok("台账页可见",vis(w,"#p-list"));
   ok("工作台已隐藏",!vis(w,"#p-home"),"display="+w.getComputedStyle(w.document.querySelector("#p-home")).display);
+
+  /* ===== 云端会话自动续期 =====
+     Supabase 的 access token 默认 1 小时过期。原来只存 access_token，
+     开着页面超过一小时任何写操作都拿 401，提示「登录已过期」，导入会断在一半。
+     这里把 fetch 打桩，不连真实 Supabase 也能验证续期逻辑。 */
+  {
+    const CB=w.LY.CloudBackend;   /* const 声明不会挂到 window 上，走 LY 调试入口 */
+    const realFetch=w.fetch;
+    let calls=[],refreshCount=0,curToken="T1",curRefresh="R1";
+    const jsonRes=(obj,status)=>({ok:(status||200)<400,status:status||200,
+      json:async()=>obj,text:async()=>JSON.stringify(obj)});
+    w.fetch=async(url,opt)=>{
+      const u=String(url);
+      calls.push({u,auth:((opt&&opt.headers)||{}).Authorization});
+      if(u.includes("grant_type=refresh_token")){
+        refreshCount++;
+        const body=JSON.parse(opt.body);
+        if(body.refresh_token!==curRefresh) return jsonRes({msg:"refresh_token 已作废"},400);
+        curToken="T"+(refreshCount+1); curRefresh="R"+(refreshCount+1);   // 一次性，用过即换
+        return jsonRes({access_token:curToken,refresh_token:curRefresh,expires_in:3600});
+      }
+      if(u.includes("/rest/v1/")){
+        const sent=(((opt&&opt.headers)||{}).Authorization||"").replace("Bearer ","");
+        if(sent!==curToken) return jsonRes({msg:"JWT expired"},401);
+        return {ok:true,status:200,text:async()=>JSON.stringify([{id:"x"}])};
+      }
+      return realFetch(url,opt);
+    };
+    CB.url="https://stub.supabase.co"; CB.key="stub_key";
+    CB.token="T1"; CB.refresh="R1"; CB.expAt=Date.now()+3600e3; CB.user={id:"u1"};
+
+    /* 1. 令牌没过期时不该乱续期 */
+    refreshCount=0; await CB.rest("contracts?select=id");
+    ok("续期_令牌新鲜时不续期",refreshCount===0,refreshCount);
+
+    /* 2. 服务端说 401 → 自动续期一次并重放，调用方拿到正常结果 */
+    curToken="T-SERVER-ROTATED";           // 服务端换了令牌，本地那个变成过期的
+    CB.token="T1"; CB.refresh=curRefresh; refreshCount=0;
+    curToken="T1";                          // 先对齐，再制造过期
+    CB.token="STALE";
+    const r2=await CB.rest("contracts?select=id");
+    ok("续期_401后自动续期",refreshCount===1,refreshCount);
+    ok("续期_401后重放成功",Array.isArray(r2)&&r2[0].id==="x",JSON.stringify(r2));
+    ok("续期_本地令牌已更新",CB.token===curToken,CB.token+" vs "+curToken);
+
+    /* 3. 并发 401 必须共用同一次续期——refresh_token 是一次性的，
+          各自去续期会互相作废，把人踢回登录页 */
+    CB.token="STALE-AGAIN"; refreshCount=0;
+    const rs=await Promise.all([1,2,3,4,5].map(()=>CB.rest("contracts?select=id")));
+    ok("续期_并发只续期一次",refreshCount===1,refreshCount);
+    ok("续期_并发请求全部成功",rs.every(x=>Array.isArray(x)&&x[0].id==="x"),JSON.stringify(rs).slice(0,60));
+
+    /* 4. 快过期时提前续期，不等 401 */
+    CB.expAt=Date.now()+10000; refreshCount=0;   // 只剩 10 秒
+    await CB.rest("contracts?select=id");
+    ok("续期_临近过期提前续",refreshCount===1,refreshCount);
+
+    /* 5. 续期凭证也失效了 → 干净地退出登录，给明确提示 */
+    CB.token="STALE"; CB.refresh="R-BAD"; CB.expAt=Date.now()+3600e3;
+    let msg="";
+    try{ await CB.rest("contracts?select=id") }catch(e){ msg=e.message }
+    ok("续期_凭证失效时报登录过期",/登录已过期|重新登录/.test(msg),msg.slice(0,60));
+    ok("续期_失败后清空会话",CB.token===null&&CB.refresh===null,CB.token+"/"+CB.refresh);
+
+    /* 6. 会话要能存下续期凭证，刷新页面后还能续 */
+    CB.token="T9"; CB.refresh="R9"; CB.expAt=Date.now()+3600e3; CB.user={id:"u1"};
+    CB.persist();
+    const saved=JSON.parse(w.localStorage.getItem("lvyue_sess"));
+    ok("续期_凭证已持久化",saved.refresh==="R9"&&saved.expAt>0,JSON.stringify(saved).slice(0,80));
+
+    w.fetch=realFetch; CB.logout();
+    w.localStorage.removeItem("lvyue_sess");
+  }
+
  }catch(e){ L.push("FAIL 异常 "+e.message) }
  const fails=L.filter(x=>x.startsWith("FAIL")).length;
  const out=(fails?"FAILED("+fails+")":"ALLPASS("+L.length+")")+"\n"+L.join("\n");
