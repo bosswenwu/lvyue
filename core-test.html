@@ -108,6 +108,43 @@ try{
   CloudBackend.logout();
   if(saved===null)localStorage.removeItem(CFGK);else localStorage.setItem(CFGK,saved);
 
+  /* 10. 表头写法差异：单位后缀、前缀、同义词
+     取自用户实际导出的「摩通合同列表」表头（数据已替换成假数据）。
+     这 15 列里原先有 9 列认不出来，其中包括物料名称和物料编号，
+     导致整表被误判成合同台账表，385 份合同全成空壳、总额 3.07 亿显示成 0。 */
+  ok("head_unit_suffix_full",headKey("含税单价（元）")==="price_tax_in",headKey("含税单价（元）"));
+  // 用户表里这一列的括号是「半角左 + 全角右」，不是笔误，是真实数据
+  ok("head_unit_suffix_mixed",headKey("价税合计(元）")==="amount_tax_in",headKey("价税合计(元）"));
+  ok("head_prefix_material",headKey("合同物料名称")==="material_name",headKey("合同物料名称"));
+  ok("head_prefix_spec",headKey("合同规格型号")==="spec",headKey("合同规格型号"));
+  ok("head_alias_orderno",headKey("采购订单号")==="order_no",headKey("采购订单号"));
+  ok("head_alias_matcode",headKey("物料编号")==="material_code",headKey("物料编号"));
+  ok("head_alias_taxrate",headKey("增值税率")==="tax_rate",headKey("增值税率"));
+  /* 前缀剥离绝不能吃掉本身就是正式字段名的表头 */
+  ok("head_prefix_safe_no",headKey("合同号")==="contract_no",headKey("合同号"));
+  ok("head_prefix_safe_amt",headKey("合同总额")==="total_amount",headKey("合同总额"));
+  ok("head_prefix_safe_name",headKey("合同名称")==="contract_name",headKey("合同名称"));
+  ok("head_prefix_safe_org",headKey("采购组织")==="purchase_org",headKey("采购组织"));
+  ok("head_prefix_safe_buyer",headKey("采购员")==="purchaser",headKey("采购员"));
+  ok("head_unknown_stays_null",headKey("不含税金额（元）")===null,headKey("不含税金额（元）"));
+
+  /* 整表按用户的真实表头解析：必须判成物料明细表，且金额列要认出来 */
+  const REALHEAD=["合同号","供应商","采购订单号","付款条件","序号","合同物料名称","合同规格型号","单位",
+    "数量","含税单价（元）","不含税金额（元）","增值税率","增值税（元）","价税合计(元）","物料编号"].join("\t");
+  const REALROWS=[
+    ["HT-9001","示例供应商甲","POD-9001","预付30%，发货付70%","1","发电机组","800kW","台","5","1000000","4424778.76","0.13","575221.24","5000000","WL9000001"],
+    ["HT-9001","示例供应商甲","POD-9001","预付30%，发货付70%","2","发电机组","1200kW","套","4","500000","1769911.5","0.13","230088.5","2000000","WL9000002"],
+    ["HT-9002","示例供应商乙","POD-9002","货到付100%","1","铝板","Q345B","千克","100","23.5","2079.65","0.13","270.35","2350","WL9000003"]
+  ].map(r=>r.join("\t"));
+  const PT=parseTable([REALHEAD,...REALROWS].join("\n"));
+  ok("real_head_is_material",PT.isMaterial===true,String(PT.isMaterial));
+  ok("real_head_rows",PT.data.length===3,PT.data.length);
+  ok("real_head_amount",PT.data[0].amount_tax_in==="5000000",PT.data[0].amount_tax_in);
+  ok("real_head_matname",PT.data[0].material_name==="发电机组",PT.data[0].material_name);
+  ok("real_head_matcode",PT.data[0].material_code==="WL9000001",PT.data[0].material_code);
+  ok("real_head_qty",PT.data[0].plan_qty==="5",PT.data[0].plan_qty);
+  ok("real_head_ignored",PT.head.filter((h,i)=>!PT.keys[i]).length===2,PT.head.filter((h,i)=>!PT.keys[i]).join("、"));
+
 }catch(e){ L.push("FAIL exception "+e.message+" @"+String(e.stack||"").split("\n")[1]) }
 const fails=L.filter(x=>x.startsWith("FAIL")).length;
 const out=(fails?"FAILED("+fails+")":"ALLPASS")+"\n"+L.join("\n");
