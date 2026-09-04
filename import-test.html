@@ -118,6 +118,46 @@ try{
   const pls=w.LY.Store.be.all("payplans").filter(p=>p.contract_id===w.LY.Store.be.all("contracts").find(c=>c.contract_no==="HCMH20250523-01").id);
   ok("月结付100%_生成节点",pls.length===1,JSON.stringify(pls.map(p=>p.name)));
   ok("月结付100%_金额全额",Math.abs(pls[0].amount-32910.40)<0.01,pls[0].amount);
+  /* ===== 5. 导入过程要看得见、点不重、错得诚实 =====
+     用户实测反馈「点了确认导入没反应」：云端模式下 385 份合同要发一千多次
+     请求、跑好几分钟，期间界面完全静止，按钮也不禁用，于是会忍不住再点一次，
+     两次导入并发跑、互相删掉对方刚插入的物料行。 */
+  const MH=["合同号","供应商","序号","合同物料名称","合同规格型号","单位","数量","含税单价（元）","价税合计(元）","物料编号"].join("\t");
+  const MR=[];
+  for(let i=1;i<=12;i++)MR.push(["PG-"+String(i).padStart(3,"0"),"供应商"+i,"1","物料"+i,"规格","个","10","100","1000","WL"+i].join("\t"));
+  $("#pasteBox").value=[MH,...MR].join("\n"); w.LY.preview($("#pasteBox").value);
+  ok("进度_导入前有按钮",!!$("#doImport"));
+
+  const pr=w.LY.doImport();
+  ok("防重_导入期间按钮已消失",!$("#doImport"));
+  const matsBefore=w.LY.Store.be.all("materials").length;
+  await w.LY.doImport();          // 并发再调一次，必须被重入锁挡住
+  await pr;
+  ok("防重_并发调用没有重复写入",w.LY.Store.be.all("materials").length===matsBefore+12,
+     w.LY.Store.be.all("materials").length-matsBefore);
+
+  const okTxt=$("#importPreview").textContent.replace(/\s+/g," ");
+  ok("完成_报了新增份数",/新增\s*12\s*份/.test(okTxt),okTxt.slice(0,80));
+  ok("完成_给了可对账的合计",/合同总额合计/.test(okTxt)&&/物料/.test(okTxt),okTxt.slice(0,120));
+
+  /* 中途失败：必须说清做到第几份、卡在哪个合同，且绝不谎报成功 */
+  $("#pasteBox").value=[MH,...MR].join("\n"); w.LY.preview($("#pasteBox").value);
+  const origIM=w.LY.Store.be.insertMany.bind(w.LY.Store.be);
+  let cnt=0;
+  w.LY.Store.be.insertMany=async(t,rows)=>{ if(t==="materials"&&++cnt>4)throw new Error("模拟网络中断"); return origIM(t,rows) };
+  await w.LY.doImport();
+  w.LY.Store.be.insertMany=origIM;
+  const errTxt=$("#importPreview").textContent.replace(/\s+/g," ");
+  ok("失败_没谎报成功",!/导入完成/.test(errTxt),errTxt.slice(0,80));
+  ok("失败_报了中断",/导入中断/.test(errTxt),errTxt.slice(0,80));
+  ok("失败_报了已完成份数",/已成功处理\s*4\s*\/\s*12/.test(errTxt),errTxt.slice(0,140));
+  ok("失败_报了卡住的合同号",/PG-005/.test(errTxt),errTxt.slice(0,180));
+  ok("失败_留了重试入口",!!$("#doImport"));
+  /* 锁必须被释放，否则失败一次之后再也导不了 */
+  await w.LY.doImport();
+  ok("失败_锁已释放可重来",/导入完成/.test($("#importPreview").textContent),
+     $("#importPreview").textContent.replace(/\s+/g," ").slice(0,80));
+
 }catch(e){ L.push("FAIL 异常 "+e.message+" @"+String(e.stack||"").split("\n")[1]) }
 const fails=L.filter(x=>x.startsWith("FAIL")).length;
 const out=(fails?"FAILED("+fails+")":"ALLPASS("+L.length+")")+"\n"+L.join("\n");
