@@ -469,7 +469,7 @@ function genPlan(o,c){
 /* ---------- 导入映射 ---------- */
 const MAP={
  "合同号":"contract_no","合同编号":"contract_no",
- "订单编号":"order_no","采购组织":"purchase_org","项目":"project",
+ "订单编号":"order_no","订单号":"order_no","采购订单号":"order_no","采购组织":"purchase_org","项目":"project",
  "采购员":"purchaser","责任人":"purchaser","采购负责人":"purchaser",
  "合同名称":"contract_name","供应商":"supplier_name","供应商名称":"supplier_name",
  "合同总额":"total_amount","合同金额":"total_amount",
@@ -484,12 +484,13 @@ const MAP={
  "合同备注":"remark","运输方式":"transport_mode",
  "已到货金额":"_arr","已开票金额":"_inv","已支付金额":"_paid","已付款金额":"_paid",
  "行号":"line_no","序号":"line_no",
- "物料编码":"material_code","物料名称":"material_name","品名":"material_name","物资名称":"material_name",
+ "物料编码":"material_code","物料编号":"material_code","物料代码":"material_code",
+ "物料名称":"material_name","品名":"material_name","物资名称":"material_name",
  "规格型号":"spec","规格":"spec","单位":"unit",
  "订购数量":"plan_qty","数量":"plan_qty",
  "含税单价":"price_tax_in","单价":"price_tax_in",
  "价税合计":"amount_tax_in","含税总价":"amount_tax_in","含税金额":"amount_tax_in","总价":"amount_tax_in",
- "税率":"tax_rate","物料品牌":"brand","品牌":"brand",
+ "税率":"tax_rate","增值税率":"tax_rate","物料品牌":"brand","品牌":"brand",
  "信息编码":"info_code","请购信息":"info_code","请购单号":"info_code",
  "需求人":"demand_user","订单行备注":"line_remark","备注":"line_remark","单重/千克":"unit_weight"
 };
@@ -499,6 +500,28 @@ const HEAD_FIELDS=["order_no","purchase_org","project","purchaser","contract_nam
   "required_arrival_date","logistics_owner","pay_condition_text","delivery_address","remark"];
 
 const cleanHead=h=>String(h||"").trim().replace(/^﻿/,"").replace(/[▲▼①②③]/g,"").replace(/\s+/g,"");
+/* 表头末尾的括号单位后缀，例如「含税单价（元）」「价税合计(元）」「重量（吨）」。
+   全半角经常混用，甚至一个括号左半角右全角（用户的表里就有 "价税合计(元）"），
+   所以左右括号各自都接受两种写法。 */
+const stripUnit=h=>h.replace(/[（(][^（()）]*[)）]$/,"");
+/* 表头 → 字段名。逐级放宽地匹配，而不是只认一个写法：
+     1. 原样命中 MAP
+     2. 去掉末尾括号单位后再试   含税单价（元） → 含税单价
+     3. 去掉「合同/采购/订单」前缀再试  合同物料名称 → 物料名称、采购订单号 → 订单号
+   顺序很重要：先原样匹配，「合同号」「合同名称」「合同总额」「采购员」这些
+   本身就是正式字段名的表头才不会被第 3 步误剥。
+   起因：用户导出的「摩通合同列表」15 列里有 9 列因为这三类写法差异没被认出来，
+   其中包括物料名称和物料编号，导致整表被误判成合同台账表——385 份合同全成了
+   没有金额、没有物料的空壳，合同总额从 3.07 亿变成 0。 */
+function headKey(h){
+  const c=cleanHead(h);
+  if(MAP[c])return MAP[c];
+  const u=stripUnit(c);
+  if(u!==c&&MAP[u])return MAP[u];
+  const p=u.replace(/^(合同|采购|订单)/,"");
+  if(p&&p!==u&&MAP[p])return MAP[p];
+  return null;
+}
 function parseTable(text){
   const t=String(text||"").replace(/\r/g,"").trim(); if(!t)return null;
   const lines=t.split("\n").filter(l=>l.trim()!=="");
@@ -519,13 +542,13 @@ function parseTable(text){
   let headIdx=-1,bestScore=0;
   for(let i=0;i<LOOK;i++){
     const cells=split(lines[i]).map(cleanHead);
-    const hits=cells.filter(h=>MAP[h]).length;
-    if(!cells.map(h=>MAP[h]).includes("contract_no"))continue;
+    const hits=cells.filter(h=>headKey(h)).length;
+    if(!cells.map(h=>headKey(h)).includes("contract_no"))continue;
     if(hits>bestScore){bestScore=hits;headIdx=i}
   }
   if(headIdx<0)return {error:"没有找到「合同号」列。请确认复制/导出的内容里带着表头行（系统会在前 15 行里自动找表头）"};
   const head=split(lines[headIdx]).map(cleanHead);
-  const keys=head.map(h=>MAP[h]||null);
+  const keys=head.map(h=>headKey(h));
   const raw=lines.slice(headIdx+1).map(l=>{const cs=split(l),r={};keys.forEach((k,i)=>{if(k)r[k]=(cs[i]||"").trim()});return r});
 
   /* 合并单元格向下补齐。同一份合同的多行物料，Excel 里常把合同号、供应商、
@@ -545,7 +568,7 @@ function parseTable(text){
       else if(hasContent&&last[k]){ r[k]=last[k]; if(k==="contract_no")carried++ }
     }
   }
-  const data=raw.filter(r=>r.contract_no&&!MAP[cleanHead(r.contract_no)]);  // 跳过重复出现的表头行
+  const data=raw.filter(r=>r.contract_no&&!headKey(r.contract_no));  // 跳过重复出现的表头行
   return {head,keys,data,headRow:headIdx+1,carried,
     isMaterial:keys.includes("material_code")||keys.includes("material_name")};
 }

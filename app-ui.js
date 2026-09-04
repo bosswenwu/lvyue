@@ -610,10 +610,25 @@ function preview(text){
   const nos=[...new Set(p.data.map(r=>r.contract_no))];
   const exist=nos.filter(n=>Store.be.all("contracts").some(c=>c.contract_no===n));
   PENDING=p;
+  /* 表头写法对不上时，整列会被静默丢掉。丢的是备注还好，丢的是金额、数量、
+     交期就会得到一份"合同都在、数字全空"的台账，而且很难看出来——用户实际
+     踩过：15 列里 9 列没认出来，物料名称和物料编号都在其中，于是物料表被
+     误判成合同台账表，385 份合同全成空壳，总额 3.07 亿显示成 0。
+     所以把"丢掉了要紧的列"和"疑似物料表却判成台账表"这两件事明着报出来。 */
+  const dropped=p.head.filter((h,i)=>!p.keys[i]);
+  const KEY=/金额|单价|合计|总额|数量|日期|交期|物料|规格|供应商|合同号/;
+  const keyDropped=dropped.filter(h=>KEY.test(h));
+  const looksMaterial=p.head.some(h=>/物料|品名|规格|型号/.test(h));
+  let warn="";
+  if(!p.isMaterial&&looksMaterial)
+    warn+=`表里有物料相关的列，却被判成<b>合同台账表</b>——多半是「物料名称」「物料编码」这两列的写法没被认出来，物料明细和金额都不会导进去。请核对表头，或把这份表发给管理员补上写法。`;
+  if(keyDropped.length)
+    warn+=(warn?"<br><br>":"")+`以下要紧的列没被识别，导入后会是空的：<b>${esc(keyDropped.join("、"))}</b>。`;
   box.innerHTML=`<div class="hint">识别为 <b>${p.isMaterial?"物料明细表":"合同台账表"}</b>${p.headRow>1?`（表头在第 ${p.headRow} 行）`:""}：${p.data.length} 行 → ${nos.length} 份合同，
     其中 <b>${exist.length}</b> 份已存在将更新，<b>${nos.length-exist.length}</b> 份新增。
     ${p.carried?`<br>有 <b>${p.carried}</b> 行的合同号是合并单元格（只有首行有值），已自动向下补齐。`:""}
-    忽略的列：${esc(p.head.filter((h,i)=>!p.keys[i]).join("、")||"无")}</div>
+    忽略的列：${esc(dropped.join("、")||"无")}</div>
+    ${warn?`<div class="critbox" style="margin-top:8px">${warn}</div>`:""}
     <div class="tw" style="max-height:230px;overflow:auto"><table><thead><tr>${p.keys.map((k,i)=>k?`<th class="no">${esc(p.head[i])}</th>`:"").join("")}</tr></thead>
     <tbody>${p.data.slice(0,6).map(r=>`<tr>${p.keys.filter(Boolean).map(k=>`<td>${esc(r[k])}</td>`).join("")}</tr>`).join("")}</tbody></table></div>
     <div class="bar"><button class="btn pri" id="doImport">确认导入</button></div>`;
