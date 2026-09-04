@@ -128,6 +128,20 @@ async function until(fn,label,ms){const t0=Date.now();while(Date.now()-t0<(ms||8
   ok("cash_has_overdue",B[0]>0,B[0]);
   ok("cash_total",Math.abs(B.reduce((a,b)=>a+b,0))>0,B.join(","));
 
+  /* 8b. 现金流预测不能静默漏算：没到期日的节点必须被统计出来并在图下方明写 */
+  {
+    const c3=w0.LY.Store.be.all("contracts").find(c=>c.contract_no==="HT-003");
+    /* 给 HT-003 造一个没有到期日的付款节点 */
+    await w0.LY.Store.be.insert("payplans",{contract_id:c3.id,name:"月结30天",ratio:1,amount:50000,due_date:"",paid:0});
+    w.go("cash"); w.go("home");
+    const B2=w.cashBuckets(12);
+    ok("cash_漏算被统计",B2.undated===50000,B2.undated);
+    ok("cash_桶里没有重复计入",B2.reduce((a,b)=>a+b,0)>0,B2.join(","));
+    const note=$("#cashNote");
+    ok("cash_图下方有说明",note&&/没有到期日/.test(note.textContent),note?note.textContent.slice(0,60):"(没有 #cashNote)");
+    await w0.LY.Store.be.removeWhere("payplans",p=>p.contract_id===c3.id);
+  }
+
   /* 9. 附件存取 */
   const rec=await w0.LY.Store.be.insert("attachments",{contract_id:c1.id,name:"合同.pdf",size:12,type:"application/pdf",by:"何祥财",at:w.nowTS()});
   await w0.LY.Store.be.putFile(rec.id,"data:text/plain;base64,aGVsbG8gd29ybGQ=");

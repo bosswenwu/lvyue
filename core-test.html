@@ -145,6 +145,37 @@ try{
   ok("real_head_qty",PT.data[0].plan_qty==="5",PT.data[0].plan_qty);
   ok("real_head_ignored",PT.head.filter((h,i)=>!PT.keys[i]).length===2,PT.head.filter((h,i)=>!PT.keys[i]).join("、"));
 
+  /* 11. id 不能撞。随机部分只有 100 万种取值，而批量写入时一整批 id 是在
+     同一个同步循环里生成的（Date.now() 相同），按生日问题 385 行就有约 7%
+     撞车、2798 行超过 80%。数据库里 id 是主键，一撞整批 INSERT 被拒、导入
+     中断。本机模式不校验唯一性，所以这个 bug 只在云端炸。 */
+  for(const k of [138,385,2798]){
+    const set=new Set(); for(let i=0;i<k;i++)set.add(uid("m"));
+    ok("uid_批量"+k+"行不撞车",set.size===k,k-set.size+" 个重复");
+  }
+  ok("uid_带前缀",uid("c").startsWith("c"),uid("c"));
+
+  /* 12. 验收款要独立成节点，不能跟到货款同名——用户表里 9 份合同是
+     「预付30%，货到付30%，验收付30%，质保付10%」这种写法，原来会生成
+     两个同名同到期日的「到货款」，登记付款时分不清哪个是哪个。 */
+  const oV={total_amount:1000000,pay_condition_text:"预付30%，货到付30%，验收付30%，质保付10%",
+    sign_date:"2026-01-10",promised_delivery_date:"2026-06-30",contract_delivery_date:"2026-06-30"};
+  const plV=genPlan(oV,calcContract(oV,[],[],[],[]));
+  ok("验收_独立成节点",plV.filter(x=>x.name==="验收款").length===1,JSON.stringify(plV.map(x=>x.name)));
+  ok("验收_不再与到货同名",plV.filter(x=>x.name==="到货款").length===1,JSON.stringify(plV.map(x=>x.name)));
+  ok("验收_比例仍合到100",Math.abs(plV.reduce((s,x)=>s+x.ratio,0)-1)<1e-9,plV.reduce((s,x)=>s+x.ratio,0));
+  /* 纯货到付不能被误判成验收 */
+  const oG={total_amount:1000,pay_condition_text:"货到付100%",promised_delivery_date:"2026-06-30"};
+  ok("货到_不受影响",genPlan(oG,calcContract(oG,[],[],[],[]))[0].name==="到货款",
+     genPlan(oG,calcContract(oG,[],[],[],[]))[0].name);
+
+  /* 13. 合同没有交期时，生成的付款节点全都没有到期日——这些钱会被现金流
+     预测整个跳过，所以必须能被上层识别出来并报给用户（见 cashBuckets）。 */
+  const oND={total_amount:1000,pay_condition_text:"月结付100%",sign_date:"",promised_delivery_date:"",contract_delivery_date:""};
+  const plND=genPlan(oND,calcContract(oND,[],[],[],[]));
+  ok("无交期_节点仍会生成",plND.length>0,plND.length);
+  ok("无交期_节点没有到期日",plND.every(x=>!x.due_date),JSON.stringify(plND.map(x=>x.due_date)));
+
 }catch(e){ L.push("FAIL exception "+e.message+" @"+String(e.stack||"").split("\n")[1]) }
 const fails=L.filter(x=>x.startsWith("FAIL")).length;
 const out=(fails?"FAILED("+fails+")":"ALLPASS")+"\n"+L.join("\n");
